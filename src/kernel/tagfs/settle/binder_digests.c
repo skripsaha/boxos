@@ -46,8 +46,9 @@ typedef struct {
     bool       refused;
 } OldRead;
 
-static error_t OldItem(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
+static error_t OldItem(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
+    (void)vol;
     OldRead*       c = ctx;
     BinderRun*     r = c->r;
     uint64_t       n = 0;
@@ -75,9 +76,8 @@ static error_t OldItem(void* ctx, TallyKey key, const uint8_t* body, uint32_t le
 /* No copy of the leaf reads: said, and the Tally names it as it lies — its
  * parent laid anew, what was born in its range left out and said
  * (tip_in.c, Touched; binder_done.c, GlossCaptured). */
-static error_t OldRotten(void* ctx, const TallyPlace* at, const char* why)
+static error_t OldRotten(TagFSVolume* vol, void* ctx, const TallyPlace* at, const char* why)
 {
-    TagFSVolume* vol = TagFSHome();
     OldRead* c = ctx;
     c->rotten  = true;
     kprintf("[TagFS] no copy of the DIGESTS leaf of blocks [%llu, %s%llu) reads (%s): Tally %llu names it as it "
@@ -89,9 +89,8 @@ static error_t OldRotten(void* ctx, const TallyPlace* at, const char* why)
 
 /* A copy of a leaf that did not hold: the next Tally lays its range again —
  * this one may name it as it lies, an offer the row did not take. */
-static void OldMended(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed)
+static void OldMended(TagFSVolume* vol, void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed)
 {
-    TagFSVolume* vol = TagFSHome();
     (void)ctx;
     (void)failed;
     DogEarMended(vol, tree, at);

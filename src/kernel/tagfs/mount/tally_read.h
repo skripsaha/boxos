@@ -80,10 +80,10 @@ typedef struct {
  * ends the walk with it. */
 typedef struct {
     void*   ctx;
-    error_t (*item)(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
-    error_t (*rotten)(void* ctx, const TallyPlace* at, const char* why);
-    error_t (*node)(void* ctx, const TallyPlace* at);
-    void    (*mend)(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed);
+    error_t (*item)(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
+    error_t (*rotten)(TagFSVolume* vol, void* ctx, const TallyPlace* at, const char* why);
+    error_t (*node)(TagFSVolume* vol, void* ctx, const TallyPlace* at);
+    void    (*mend)(TagFSVolume* vol, void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed);
     bool    said;      /* the Tally the mount stands on: what the walk finds against the
                         * format is said, and what it cannot carry on puts the volume
                         * under glass — of any other slot's Tally, neither */
@@ -135,8 +135,8 @@ error_t TallyDigestsKeep(TagFSVolume* vol, const TallyPlace* leaf, bool rotten);
  * `ctx`. Said for each leaf that rots. OK, or the refusal of a leaf that
  * could not be read — memory's or the medium's. The mount's, when a FILES
  * range rots (§16.1 п.5). */
-error_t TallyDigestsEach(TagFSVolume* vol, void (*run)(void* ctx, uint64_t start, uint64_t count),
-                         void (*rot)(void* ctx, uint64_t start, uint64_t count, bool to_end), void* ctx);
+error_t TallyDigestsEach(TagFSVolume* vol, void (*run)(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t count),
+                         void (*rot)(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t count, bool to_end), void* ctx);
 
 /* What the Tally says of one block's digest (TallyDigestFind). */
 typedef enum {
@@ -158,7 +158,7 @@ TallyDigestSays TallyDigestFind(TagFSVolume* vol, uint64_t block, uint64_t* dige
  * nodes a Tally names as they lie (§16.4 п.5, settle/binder.c), a leaf a turn
  * of the Settle's holder, with no TagFS lock held. OK, or the medium's,
  * memory's or the callback's refusal. */
-error_t TallyDigestsRottenNext(TagFSVolume* vol, uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,
+error_t TallyDigestsRottenNext(TagFSVolume* vol, uint32_t* leaf, error_t (*rot)(TagFSVolume* vol, void* ctx, const TallyPlace* at), void* ctx,
                                bool* done);
 
 /* The `index`-th leaf of the DIGESTS the reads stand on, in key order —
@@ -179,7 +179,7 @@ uint32_t TallyDigestLeaves(TagFSVolume* vol);
  * nothing, said once as a read says it. OK, or memory's or the medium's
  * refusal. Dedup's walk of the book (dedup/dedup.h), from any core, inside
  * the door. */
-typedef void (*TallyDigestsRun)(void* ctx, uint64_t start, uint64_t n, const uint8_t* digests);
+typedef void (*TallyDigestsRun)(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t n, const uint8_t* digests);
 error_t TallyDigestsFrom(TagFSVolume* vol, uint64_t block, TallyDigestsRun run, void* ctx, uint64_t* next, uint64_t* sheets);
 
 /* How many ranges of the DIGESTS the reads stand on are known to read in no

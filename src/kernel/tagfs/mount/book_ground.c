@@ -86,18 +86,16 @@ static void BookGroundNodeOf(TagFSVolume* vol, const TallyPlace* at, uint32_t sl
     }
 }
 
-error_t BookGroundNode(void* ctx, const TallyPlace* at)
+error_t BookGroundNode(TagFSVolume* vol, void* ctx, const TallyPlace* at)
 {
-    TagFSVolume* vol = TagFSHome();
     (void)ctx;
     BookGroundNodeOf(vol, at, vol->book.stood->index);
     FoliationNoted(vol, vol->book.laid_tree, at, vol->book.stood->head.tally_seq);
     return OK;
 }
 
-void BookGroundMended(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed)
+void BookGroundMended(TagFSVolume* vol, void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed)
 {
-    TagFSVolume* vol = TagFSHome();
     (void)ctx;
     vol->book.said.mended += failed;
     if (at->level == 0)
@@ -107,9 +105,8 @@ void BookGroundMended(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t f
 }
 
 /* A node of a slot not stood on, `ctx` the slot. */
-static error_t BookGroundOlderNode(void* ctx, const TallyPlace* at)
+static error_t BookGroundOlderNode(TagFSVolume* vol, void* ctx, const TallyPlace* at)
 {
-    TagFSVolume* vol = TagFSHome();
     BookGroundNodeOf(vol, at, ((const SpineSlot*)ctx)->index);
     return OK;
 }
@@ -147,8 +144,9 @@ static void BookGroundRibbon(TagFSVolume* vol, const SpineSlot* s, const RibbonW
  * no name that reads gives, and such a slot is read for its ground alone
  * (§4.5 п.4) — its rot is not the mount's to say, nor to lock anything by
  * (bookmount.py _Older). */
-static error_t BookGroundOlderRot(void* ctx, const TallyPlace* at, const char* why)
+static error_t BookGroundOlderRot(TagFSVolume* vol, void* ctx, const TallyPlace* at, const char* why)
 {
+    (void)vol;
     (void)ctx;
     (void)at;
     (void)why;
@@ -357,16 +355,14 @@ static void BookGroundBoot(TagFSVolume* vol)
 /* Every digested block, and every range a rotten leaf would have digested,
  * held — when a FILES range rots, a block no name owns may be a locked
  * file's (§16.1 п.5). */
-static void BookHeldDigested(void* ctx, uint64_t start, uint64_t count)
+static void BookHeldDigested(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t count)
 {
-    TagFSVolume* vol = TagFSHome();
     (void)ctx;
     BookGroundHoldRun(vol, start, count);
 }
 
-static void BookHeldRotten(void* ctx, uint64_t start, uint64_t count, bool to_end)
+static void BookHeldRotten(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t count, bool to_end)
 {
-    TagFSVolume* vol = TagFSHome();
     (void)ctx;
     BookGroundHoldRun(vol, start, to_end ? (start < vol->book.data_end ? vol->book.data_end - start : 0) : count);
 }

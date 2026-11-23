@@ -68,8 +68,9 @@ static error_t CheckDefect(const BinderWork* w, TallyKey key, const char* what)
 // The Tally before, a leaf at a time
 // ----------------------------------------------------------------------------
 
-static error_t CheckOldItem(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
+static error_t CheckOldItem(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
+    (void)vol;
     BinderCheck* c = ctx;
     (void)seq;
     if (c->n == c->capn) {
@@ -100,8 +101,9 @@ static error_t CheckOldItem(void* ctx, TallyKey key, const uint8_t* body, uint32
     return OK;
 }
 
-static error_t CheckOldRotten(void* ctx, const TallyPlace* at, const char* why)
+static error_t CheckOldRotten(TagFSVolume* vol, void* ctx, const TallyPlace* at, const char* why)
 {
+    (void)vol;
     BinderCheck* c = ctx;
     c->rotten = true;
     kprintf("[TagFS] the Tally's self-check passes over a %s leaf of the Tally before at block %llu: it reads in "
@@ -110,8 +112,9 @@ static error_t CheckOldRotten(void* ctx, const TallyPlace* at, const char* why)
     return OK;
 }
 
-static void CheckOldMended(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed)
+static void CheckOldMended(TagFSVolume* vol, void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed)
 {
+    (void)vol;
     (void)ctx;
     kprintf("[TagFS] the Tally's self-check read the %s leaf of the Tally before at block %llu from its next "
             "copy: %u of its copies do not hold — the Tally it checks lays the leaf's range anew\n",

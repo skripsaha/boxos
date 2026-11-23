@@ -328,8 +328,8 @@ error_t BookGroundCensus(TagFSVolume* vol, const char** what);
  * past a copy that did not hold, counted and written again by the next Tally —
  * a leaf's keys into DogEar, an inner node marked in the Foliation — a
  * TallySink's `mend`. */
-error_t BookGroundNode(void* ctx, const TallyPlace* at);
-void    BookGroundMended(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed);
+error_t BookGroundNode(TagFSVolume* vol, void* ctx, const TallyPlace* at);
+void    BookGroundMended(TagFSVolume* vol, void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed);
 
 /* A run of ground a locked file is known to name: what of it lies in the data
  * run held unless another owns it, all of it counted in the census's reach. */

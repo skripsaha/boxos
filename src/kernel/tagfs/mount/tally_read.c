@@ -426,7 +426,7 @@ static uint32_t TallyDigestLeafFrom(const TallyDigestTable* t, uint64_t block)
 /* A leaf's elements from block `from` on, each run of digested blocks handed
  * to `run`: an element that does not read ends the hand — the blocks past it
  * carry no digest this leaf can give. */
-static void TallyDigestsHand(const uint8_t* s, uint32_t room, uint64_t from, TallyDigestsRun run, void* ctx)
+static void TallyDigestsHand(TagFSVolume* vol, const uint8_t* s, uint32_t room, uint64_t from, TallyDigestsRun run, void* ctx)
 {
     NodeHead       h;
     TallyKey       prev, key;
@@ -443,7 +443,7 @@ static void TallyDigestsHand(const uint8_t* s, uint32_t room, uint64_t from, Tal
         if (n == 0 || key.k1 + n <= from)
             continue;
         skip = key.k1 < from ? from - key.k1 : 0;
-        run(ctx, key.k1 + skip, n - skip, d + skip * 8u);
+        run(vol, ctx, key.k1 + skip, n - skip, d + skip * 8u);
     }
 }
 
@@ -465,7 +465,7 @@ error_t TallyDigestsFrom(TagFSVolume* vol, uint64_t block, TallyDigestsRun run, 
         else
             rc = TallyDigestLeafRead(vol, t, leaf, &s, &room);
         if (rc == OK && s)
-            TallyDigestsHand(s, room, block, run, ctx);
+            TallyDigestsHand(vol, s, room, block, run, ctx);
         kfree(s);
     }
     TallyDigestLeave(t);
@@ -482,7 +482,7 @@ uint32_t TallyDigestsRotKnown(TagFSVolume* vol)
     return n;
 }
 
-error_t TallyDigestsRottenNext(TagFSVolume* vol, uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,
+error_t TallyDigestsRottenNext(TagFSVolume* vol, uint32_t* leaf, error_t (*rot)(TagFSVolume* vol, void* ctx, const TallyPlace* at), void* ctx,
                                bool* done)
 {
     TallyDigestTable* t  = TallyDigestEnter(vol);
@@ -497,7 +497,7 @@ error_t TallyDigestsRottenNext(TagFSVolume* vol, uint32_t* leaf, error_t (*rot)(
             kfree(s);
         }
         if (rc == OK && rotten)
-            rc = rot(ctx, &t->leaves[*leaf].place);
+            rc = rot(vol, ctx, &t->leaves[*leaf].place);
         *leaf += rc == OK;
     }
     *done = rc == OK && *leaf >= t->count;
@@ -508,8 +508,8 @@ error_t TallyDigestsRottenNext(TagFSVolume* vol, uint32_t* leaf, error_t (*rot)(
 /* One leaf's elements, each a run of digested blocks — and one that does not
  * read, the range up to the next element's key, or the leaf's end. */
 static void TallyDigestsOf(TagFSVolume* vol, TallyDigestTable* t, uint32_t leaf, const uint8_t* s, uint32_t room,
-                           void (*run)(void* ctx, uint64_t start, uint64_t count),
-                           void (*rot)(void* ctx, uint64_t start, uint64_t count, bool to_end), void* ctx)
+                           void (*run)(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t count),
+                           void (*rot)(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t count, bool to_end), void* ctx)
 {
     const TallyPlace* p = &t->leaves[leaf].place;
     NodeHead          h;
@@ -524,11 +524,11 @@ static void TallyDigestsOf(TagFSVolume* vol, TallyDigestTable* t, uint32_t leaf,
     for (uint64_t i = 0; i < h.items && TallyItemGet(s, room, &at, TALLY_DIGESTS, prev, &key, &body, &len); i++) {
         prev = key;
         if (open) {
-            rot(ctx, broken, key.k1 - broken, false);
+            rot(vol, ctx, broken, key.k1 - broken, false);
             open = false;
         }
         if (TallyDigestsGet(s + body, len, &n, &d) != TALLY_BODY_BROKEN) {
-            run(ctx, key.k1, n);
+            run(vol, ctx, key.k1, n);
         } else {
             TallyDigestRotSay(vol, t, leaf, "its element does not read");
             broken = key.k1;
@@ -536,11 +536,11 @@ static void TallyDigestsOf(TagFSVolume* vol, TallyDigestTable* t, uint32_t leaf,
         }
     }
     if (open)
-        rot(ctx, broken, p->has_hi && p->hi.k1 > broken ? p->hi.k1 - broken : 0, !p->has_hi);
+        rot(vol, ctx, broken, p->has_hi && p->hi.k1 > broken ? p->hi.k1 - broken : 0, !p->has_hi);
 }
 
-error_t TallyDigestsEach(TagFSVolume* vol, void (*run)(void* ctx, uint64_t start, uint64_t count),
-                         void (*rot)(void* ctx, uint64_t start, uint64_t count, bool to_end), void* ctx)
+error_t TallyDigestsEach(TagFSVolume* vol, void (*run)(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t count),
+                         void (*rot)(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t count, bool to_end), void* ctx)
 {
     TallyDigestTable* t = &vol->tally_read.tables[vol->tally_read.table_at];
     for (uint32_t leaf = 0; leaf < t->count; leaf++) {
@@ -554,7 +554,7 @@ error_t TallyDigestsEach(TagFSVolume* vol, void (*run)(void* ctx, uint64_t start
         if (!s) {
             if (t->leaves[leaf].rotten)
                 TallyDigestRotSay(vol, t, leaf, "a node above it does not read");
-            rot(ctx, lo, p->has_hi && p->hi.k1 > lo ? p->hi.k1 - lo : 0, !p->has_hi);
+            rot(vol, ctx, lo, p->has_hi && p->hi.k1 > lo ? p->hi.k1 - lo : 0, !p->has_hi);
             continue;
         }
         TallyDigestsOf(vol, t, leaf, s, room, run, rot, ctx);

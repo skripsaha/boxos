@@ -94,9 +94,8 @@ static bool DedupAmong(TagFSVolume* vol)
  * Commonplace holds for another block is matched to them — the first such
  * block a pass, for a digest — and a block of Commonplace itself is no match
  * of its own. *ctx no memory. */
-static void DedupWalkRun(void* ctx, uint64_t start, uint64_t n, const uint8_t* digests)
+static void DedupWalkRun(TagFSVolume* vol, void* ctx, uint64_t start, uint64_t n, const uint8_t* digests)
 {
-    TagFSVolume* vol = TagFSHome();
     bool* refused = ctx;
     for (uint64_t i = 0; i < n && !*refused; i++) {
         uint64_t          count = 0, digest = TallyDigestAt(digests, i), block = start + i;

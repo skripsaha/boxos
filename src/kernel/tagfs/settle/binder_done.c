@@ -34,9 +34,8 @@ error_t BinderKeptPut(BinderRun* r, const BinderKept* k)
     return OK;
 }
 
-error_t BinderRotOfDigests(void* ctx, const TallyPlace* at)
+error_t BinderRotOfDigests(TagFSVolume* vol, void* ctx, const TallyPlace* at)
 {
-    TagFSVolume* vol = TagFSHome();
     if (EscheatDigestsLaid(vol, at))
         return OK;     /* laid anew of the data under the act (escheat.c) */
     return BinderKeptPut((BinderRun*)ctx, &(BinderKept){ .tree = TALLY_DIGESTS, .at = *at, .rotten = true });

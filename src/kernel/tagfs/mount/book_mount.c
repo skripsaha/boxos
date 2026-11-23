@@ -251,16 +251,14 @@ static error_t BookRibbon(TagFSVolume* vol, const char** what)
 
 /* DIGESTS at the mount: its inner nodes read, each leaf kept by the range of
  * blocks it covers, read when a block of it is (§8.1, TallyDigestFind). */
-static error_t BookDigestNode(void* ctx, const TallyPlace* at)
+static error_t BookDigestNode(TagFSVolume* vol, void* ctx, const TallyPlace* at)
 {
-    TagFSVolume* vol = TagFSHome();
-    BookGroundNode(ctx, at);
+    BookGroundNode(vol, ctx, at);
     return at->level == 0 && at->ptr.copies ? TallyDigestsKeep(vol, at, false) : OK;
 }
 
-static error_t BookDigestRot(void* ctx, const TallyPlace* at, const char* why)
+static error_t BookDigestRot(TagFSVolume* vol, void* ctx, const TallyPlace* at, const char* why)
 {
-    TagFSVolume* vol = TagFSHome();
     (void)ctx;
     (void)why;
     if (at->level > 0)
@@ -268,8 +266,9 @@ static error_t BookDigestRot(void* ctx, const TallyPlace* at, const char* why)
     return TallyDigestsKeep(vol, at, true);
 }
 
-static error_t BookQuietRot(void* ctx, const TallyPlace* at, const char* why)
+static error_t BookQuietRot(TagFSVolume* vol, void* ctx, const TallyPlace* at, const char* why)
 {
+    (void)vol;
     (void)ctx;
     (void)at;
     (void)why;

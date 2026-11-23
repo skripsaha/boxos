@@ -157,8 +157,9 @@ static bool LookMeets(const FacsimileLook* l, const TallyPlace* p)
     return below && above;
 }
 
-static error_t LookNode(void* ctx, const TallyPlace* at)
+static error_t LookNode(TagFSVolume* vol, void* ctx, const TallyPlace* at)
 {
+    (void)vol;
     FacsimileLook* l = ctx;
     if (at->level != 0 || !LookMeets(l, at))
         return OK;
@@ -177,8 +178,9 @@ static error_t LookNode(void* ctx, const TallyPlace* at)
     return OK;
 }
 
-static error_t LookRotten(void* ctx, const TallyPlace* at, const char* why)
+static error_t LookRotten(TagFSVolume* vol, void* ctx, const TallyPlace* at, const char* why)
 {
+    (void)vol;
     FacsimileLook* l = ctx;
     (void)why;
     l->rotten |= LookMeets(l, at);
@@ -194,8 +196,9 @@ static uint64_t HeldRoom(uint32_t len)
 
 /* An element of the keys kept as the leaf held it — the take lays it in
  * from here, and reads no leaf again. */
-static error_t LookItem(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
+static error_t LookItem(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
+    (void)vol;
     FacsimileLook* l = ctx;
     if (key.k1 < l->lo || (l->hi != UINT64_MAX && key.k1 >= l->hi))
         return OK;

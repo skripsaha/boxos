@@ -284,7 +284,7 @@ static void TallyNodeSaid(TagFSVolume* vol, const TallySink* sink, uint64_t tree
                 "is read, and the next Tally writes the node again\n", TallyTreeName(tree),
                 (unsigned long long)p->level, blocks, r->said.failed - one_by_one, r->said.failed + 1u);
     if (sink->mend && r->said.failed)
-        sink->mend(sink->ctx, tree, p, r->said.failed);
+        sink->mend(vol, sink->ctx, tree, p, r->said.failed);
     if (r->node.head_longer) {
         ksnprintf(words, sizeof(words), "a NodeHead is %u byte(s) longer than this reader knows — written "
                   "by a kernel that knows more", r->node.head_longer);
@@ -301,7 +301,7 @@ static void TallyNodeSaid(TagFSVolume* vol, const TallySink* sink, uint64_t tree
 }
 
 /* A leaf's items, handed to the reader in their order. */
-static error_t TallyLeafItems(uint64_t tree, const TallyPlace* p, const TallyReading* r,
+static error_t TallyLeafItems(TagFSVolume* vol, uint64_t tree, const TallyPlace* p, const TallyReading* r,
                               const TallySink* sink)
 {
     const uint8_t* s     = r->node.unit.stream;
@@ -312,7 +312,7 @@ static error_t TallyLeafItems(uint64_t tree, const TallyPlace* p, const TallyRea
         TallyItemGet(s, end, &at, tree, prev, &key, &body, &len);
         prev = key;
         under += tree != TALLY_FILES || key.k2 == 0;
-        error_t rc = sink->item(sink->ctx, key, s + body, len, p->ptr.seq);
+        error_t rc = sink->item(vol, sink->ctx, key, s + body, len, p->ptr.seq);
         if (rc != OK)
             return rc;
     }
@@ -406,11 +406,11 @@ static error_t TallyVisit(TagFSVolume* vol, uint64_t tree, const TallyPlace* p, 
                           TallyStack* st, TallyReading* r)
 {
     char*   why = r->words;
-    error_t rc  = sink->node ? sink->node(sink->ctx, p) : OK;
+    error_t rc  = sink->node ? sink->node(vol, sink->ctx, p) : OK;
     if (rc != OK)
         return rc;
     if (p->ptr.copies == 0)
-        return sink->rotten(sink->ctx, p, "its pointer: it does not read");
+        return sink->rotten(vol, sink->ctx, p, "its pointer: it does not read");
     if (p->level == 0 && !leaves)
         return OK;
 #ifdef CONFIG_VOLUME_TESTS
@@ -421,15 +421,15 @@ static error_t TallyVisit(TagFSVolume* vol, uint64_t tree, const TallyPlace* p, 
         return rc;
     if (!r->node.unit.whole) {
         TallyCopiesWords(&r->said, why, sizeof(r->words));
-        rc = sink->rotten(sink->ctx, p, why);
+        rc = sink->rotten(vol, sink->ctx, p, why);
     } else if (r->node.head.tree != tree || r->node.head.level != p->level) {
         ksnprintf(why, sizeof(r->words), "it is a node of tree %llu level %llu",
                   (unsigned long long)r->node.head.tree, (unsigned long long)r->node.head.level);
-        rc = sink->rotten(sink->ctx, p, why);
+        rc = sink->rotten(vol, sink->ctx, p, why);
     } else {
         if (sink->said)
             TallyNodeSaid(vol, sink, tree, p, r);
-        rc = p->level == 0 ? TallyLeafItems(tree, p, r, sink) : TallyInnerKids(vol, tree, p, r, sink, st);
+        rc = p->level == 0 ? TallyLeafItems(vol, tree, p, r, sink) : TallyInnerKids(vol, tree, p, r, sink, st);
     }
     TallyNodeLetGo(&r->node);
     return rc;
@@ -443,16 +443,16 @@ error_t TallyLeafRead(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, con
         return ERR_NO_MEMORY;
     if (at->ptr.copies == 0) {
         kfree(r);
-        return sink->rotten(sink->ctx, at, "its pointer: it does not read");
+        return sink->rotten(vol, sink->ctx, at, "its pointer: it does not read");
     }
     if ((rc = TallyNodeRead(vol, at, &r->node, &r->said)) == OK) {
         if (!r->node.unit.whole || r->node.head.tree != tree || r->node.head.level != 0) {
             TallyCopiesWords(&r->said, r->words, sizeof(r->words));
-            rc = sink->rotten(sink->ctx, at, r->words);
+            rc = sink->rotten(vol, sink->ctx, at, r->words);
         } else {
             if (sink->mend && r->said.failed)
-                sink->mend(sink->ctx, tree, at, r->said.failed);
-            rc = TallyLeafItems(tree, at, r, sink);
+                sink->mend(vol, sink->ctx, tree, at, r->said.failed);
+            rc = TallyLeafItems(vol, tree, at, r, sink);
         }
     }
     TallyNodeLetGo(&r->node);

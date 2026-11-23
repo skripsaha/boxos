@@ -229,7 +229,7 @@ const BinderKept* BinderKeptRoot(const BinderWork* w);
  * the Tally's DONE; a slot whose write or flush was refused held as naming
  * either Tally. */
 error_t     BinderKeptPut(BinderRun* r, const BinderKept* k);
-error_t     BinderRotOfDigests(void* ctx, const TallyPlace* at);
+error_t     BinderRotOfDigests(TagFSVolume* vol, void* ctx, const TallyPlace* at);
 error_t     BinderRotsTaken(TagFSVolume* vol, BinderRun* r);
 error_t     BinderFreshGround(TagFSVolume* vol, BinderRun* r);
 error_t     BinderTallyDone(TagFSVolume* vol, BinderRun* r);

@@ -541,7 +541,7 @@ static error_t BookFileLive(TagFSVolume* vol, BookFile* f)
 }
 
 static error_t BookFileAside(TagFSVolume* vol, BookFile* f);
-static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
+static error_t LeavesTag(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
 
 error_t BookFileClose(TagFSVolume* vol)
 {
@@ -673,7 +673,7 @@ error_t BookFacsimileItem(TagFSVolume* vol, uint64_t tree, TallyKey key, const u
 {
     BookFile* f = &vol->book.file;
     if (tree == TALLY_TAGS)
-        return LeavesTag(NULL, key, body, len, seq);
+        return LeavesTag(vol, NULL, key, body, len, seq);
     if (f->open && key.k1 != f->fid) {
         error_t rc = BookFacsimileClose(vol);
         if (rc != OK)
@@ -687,9 +687,8 @@ error_t BookFacsimileItem(TagFSVolume* vol, uint64_t tree, TallyKey key, const u
 }
 
 /* A FILES item: (fid, 0) the header, (fid, 1 + b) the Parcel from block b. */
-static error_t LeavesFile(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
+static error_t LeavesFile(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
-    TagFSVolume* vol = TagFSHome();
     BookFile* f = &vol->book.file;
     (void)ctx;
     if (f->open && key.k1 != f->fid) {
@@ -850,9 +849,8 @@ error_t BookTagAsideNoted(TagFSVolume* vol, uint64_t tid, const TallyTag* t)
     return OK;
 }
 
-static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
+static error_t LeavesTag(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
-    TagFSVolume* vol = TagFSHome();
     TallyTag t;
     char     words[160];
     (void)ctx;
@@ -894,9 +892,8 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
 }
 
 /* The Use Context: the tree's one element, key 0. */
-static error_t LeavesUse(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
+static error_t LeavesUse(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
-    TagFSVolume* vol = TagFSHome();
     const uint8_t* text = NULL;
     uint64_t       n    = 0;
     LeavesWalk*    walk = (LeavesWalk*)ctx;
@@ -915,8 +912,9 @@ static error_t LeavesUse(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
     return BookUseRecalled(vol, text, n);
 }
 
-static error_t LeavesNone(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
+static error_t LeavesNone(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
+    (void)vol;
     (void)ctx;
     (void)key;
     (void)body;
@@ -927,9 +925,8 @@ static error_t LeavesNone(void* ctx, TallyKey key, const uint8_t* body, uint32_t
 
 /* A rotten range of a tree whose leaves hold no file: said as the census says
  * it. */
-static error_t LeavesRot(void* ctx, const TallyPlace* at, const char* why)
+static error_t LeavesRot(TagFSVolume* vol, void* ctx, const TallyPlace* at, const char* why)
 {
-    TagFSVolume* vol = TagFSHome();
     uint64_t tree = ((const LeavesWalk*)ctx)->tree;
     if (at->level > 0)
         EndpaperLaidNode(&vol->book.laid, tree, at->level, 0, 1u, at->has_lo ? at->lo.k1 : 0);
