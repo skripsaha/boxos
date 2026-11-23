@@ -932,6 +932,13 @@ static void TestAsks(void)
     Check(AsksOf("asks\nask tags\n", &asks, &unknown) == BOX_OK && !asks.SeeTags && !asks.ChangeTags &&
               unknown == 2,
           "asks: a word near them is no word, passed over and never granted");
+    Check(AsksOf("asks\nask change-disks to lay partitions\n", &asks, &unknown) == BOX_OK && asks.ChangeDisks &&
+              !asks.ChangeTags && !asks.SeeTags && !asks.Utility && unknown == 0,
+          "asks: change-disks, the disks' tables to change, and nothing of the person's tags with it");
+    Check(AsksOf("asks\nask change-disks\nask change-disks\n", &asks, &unknown) == BOX_TEXT_LAYOUT,
+          "asks: change-disks said twice");
+    Check(AsksOf("asks\nask disks\n", &asks, &unknown) == BOX_OK && !asks.ChangeDisks && unknown == 2,
+          "asks: seeing the disks is no word to ask: every program may");
 }
 
 /* ── the signature ───────────────────────────────────────────────────────── */

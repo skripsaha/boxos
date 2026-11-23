@@ -1505,10 +1505,10 @@ error_t tagfs_write_block(TagFSVolume* vol, uint64_t block, const void *buffer)
 // it is the bare (value=NULL) entry for one of these keys; a value-bearing tag
 // like "system:foo" is a distinct entry and stays a user tag. None of these is
 // a file's role: that is its record's, and a file wearing the word system is
-// only a file its user called so. The image builder lays them first, at ids
-// 0-6 in this order, and they are re-stamped at every mount below. Built from
-// the same tagfs_reserved.h source as the builder's seed and the authority
-// bits, so the lists cannot drift.
+// only a file its user called so. The image builder lays them first, at the
+// first ids in this order, and they are re-stamped at every mount below. Built
+// from the same tagfs_reserved.h source as the builder's seed and the
+// authority bits, so the lists cannot drift.
 static const char *const TagFsReservedKeys[] = {
 #define X(id, key) key,
     TAGFS_RESERVED_KEYS(X)

@@ -90,6 +90,23 @@ void TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out)
     tagfs_leave(vol);
 }
 
+uint32_t TagFSVolumesOn(uint8_t seat, uint32_t* numbers, uint64_t* grounds, uint32_t max)
+{
+    uint32_t seating = BoardroomSeatSeating(seat), found = 0;
+    if (seating == 0)
+        return 0;
+    for (TagFSVolume* vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol)) {
+        if (!vol->state.initialized || vol->mount.seat != seat || vol->mount.seating != seating)
+            continue;
+        if (found < max) {
+            numbers[found] = vol->number;
+            grounds[found] = vol->mount.base;
+        }
+        found++;
+    }
+    return found;
+}
+
 uint64_t TagFSHouseId(const TagFSVolume* vol, uint64_t fid)
 {
     return fid ? ((uint64_t)vol->number << TAGFS_VOLUME_FILE_BITS) | fid : 0;

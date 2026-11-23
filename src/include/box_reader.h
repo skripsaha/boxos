@@ -939,6 +939,9 @@ static inline BoxVerdict BoxLifeRead(const uint8_t *bytes, uint64_t size, BoxLif
  *   ask change-tags [why]  to put the person's tags on and take them off, and
  *                          a program's own off a file as the person's hands;
  *                          seeing them with it
+ *   ask change-disks [why] to change the partition tables of the machine's
+ *                          disks as the person's hands (boxos_disks.h); every
+ *                          program may see them
  *
  * Every program has tags of its own without asking: its own words for its own
  * files, which no other program meets (tagfs.h, TagOwner). The person's are
@@ -960,6 +963,7 @@ typedef struct {
     uint8_t Network;
     uint8_t SeeTags;
     uint8_t ChangeTags;
+    uint8_t ChangeDisks;
 } BoxAsks;
 
 static inline BoxVerdict BoxAsksRead(const uint8_t *bytes, uint64_t size, BoxAsks *out, uint64_t *unknown)
@@ -970,6 +974,7 @@ static inline BoxVerdict BoxAsksRead(const uint8_t *bytes, uint64_t size, BoxAsk
     out->Network    = 0;
     out->SeeTags    = 0;
     out->ChangeTags = 0;
+    out->ChangeDisks = 0;
     if (unknown) *unknown = 0;
     if (verdict != BOX_OK) return verdict;
 
@@ -983,7 +988,8 @@ static inline BoxVerdict BoxAsksRead(const uint8_t *bytes, uint64_t size, BoxAsk
         uint8_t *asked = BoxSpanIs(word, word_length, "utility")       ? &out->Utility
                        : BoxSpanIs(word, word_length, "network")       ? &out->Network
                        : BoxSpanIs(word, word_length, "see-tags")      ? &out->SeeTags
-                       : BoxSpanIs(word, word_length, "change-tags")   ? &out->ChangeTags : NULL;
+                       : BoxSpanIs(word, word_length, "change-tags")   ? &out->ChangeTags
+                       : BoxSpanIs(word, word_length, "change-disks")  ? &out->ChangeDisks : NULL;
         if (!asked) {
             if (unknown && *unknown == 0) {
                 uint64_t number = 1;

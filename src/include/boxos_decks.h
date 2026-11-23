@@ -671,7 +671,42 @@
 #define HW_RTC_GET_UPTIME     0x15
 
 #define HW_DISK_FLUSH         0x50
-#define HW_DISK_INFO          0x51
+
+/* The disks of the machine and their tables (boxos_disks.h; the kernel's
+ * DiskTable, boardroom/disk_table.h).
+ *
+ * hw.disks.list — every disk with a medium in it, in the order of its seat:
+ * no params; out_crate as boxos_disks.h says. Every program may ask.
+ *
+ * The changes, by the person's hands: a box that asks `change-disks`
+ * (ERR_ACCESS_DENIED otherwise). Each names the disk a person looked at —
+ * params begin [u8 seat][u32 seating] as hw.disks.list gave them — and is
+ * answered once the table is on the medium and read back as it was meant; a
+ * cut or a refusal on the way leaves the old table or the new, whole.
+ *   hw.disk.lay     a new GPT over the whole disk, no partition in it —
+ *                   never of a disk a volume of the house stands on (ERR_BUSY)
+ *   hw.disk.add     params + [u8 kind (DISK_PART_ESP or DISK_PART_BOXOS)]
+ *                   [u64 first_block][u64 blocks]: a partition laid inside
+ *                   one free run, from its grain; out_crate (optional)
+ *                   [u16 entry], the place it took
+ *   hw.disk.remove  params + [u16 entry]: BoxOS's own partition taken away —
+ *                   never another's (ERR_INVALID_ARGUMENT), never one a volume
+ *                   of the house stands on (ERR_BUSY)
+ *   hw.disk.mend    both copies of a GPT written from the one read, the far
+ *                   one at the end of the disk; OK and nothing written when
+ *                   they hold and agree
+ * The answers DiskTable's (disk_table.h): ERR_OBJECT_NOT_FOUND for a seat that
+ * is empty or holds another disk since; ERR_WOULD_BLOCK while another change
+ * of a table is under way; ERR_INVALID_STATE for a disk with no GPT to change;
+ * ERR_CORRUPTED for one whose copies are to be mended first; ERR_OUT_OF_RANGE
+ * for a run that is not free, or an entry with no partition; ERR_QUOTA_EXCEEDED
+ * for a table with no entry left; ERR_PERMISSION_DENIED for a medium that
+ * refuses writes; ERR_DEVICE_NOT_READY for one that left on the way. */
+#define HW_DISKS_LIST         0x51
+#define HW_DISK_LAY           0x52
+#define HW_DISK_ADD           0x53
+#define HW_DISK_REMOVE        0x54
+#define HW_DISK_MEND          0x55
 
 /* The screen is lent to the one system program that draws (screen.h). */
 #define HW_SCREEN_CLAIM         0x60

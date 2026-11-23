@@ -51,6 +51,12 @@ typedef struct {
 } TagFSVolumeFacts;
 void         TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out);
 
+/* The volumes of the house that stand on the disk in `seat` now — its present
+ * occupant: each one's number and the sector its ground begins at, at most
+ * `max` of them; how many there are. What a change of the disk's table may
+ * not touch (DiskInUse, disk_table.h). */
+uint32_t     TagFSVolumesOn(uint8_t seat, uint32_t* numbers, uint64_t* grounds, uint32_t max);
+
 /* The sixteen bytes volume `vol` calls itself (its Deed's); zeros for the home
  * volume before it stands on one. */
 void         TagFSVolumeUuid(const TagFSVolume* vol, uint8_t out[16]);

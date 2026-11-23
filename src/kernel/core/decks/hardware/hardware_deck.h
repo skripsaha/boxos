@@ -3,12 +3,20 @@
 
 #include "ktypes.h"
 #include "boxos_decks.h"
+#include "op_registry.h"
 
 #define HARDWARE_DECK_ID DECK_HARDWARE
 
 /* The deck's opcodes live in boxos_decks.h, shared with boxlib. */
 
 error_t HardwareDeckRegister(void);
+
+/* The disks and their tables (hardware_disks.c). */
+int HwDisksList(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx);
+int HwDiskLay(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx);
+int HwDiskAdd(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx);
+int HwDiskRemove(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx);
+int HwDiskMend(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx);
 
 /*
  * Prove, on this machine, that asking the hardware deck to put a USB controller

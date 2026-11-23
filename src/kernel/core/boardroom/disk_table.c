@@ -473,6 +473,9 @@ static error_t DiskGptRead(DiskTable* t)
         t->entry_bytes  = read->entry_bytes;
         t->entries      = read->array;
         read->array     = NULL;
+        t->first_entries = first.verdict == DISK_GPT_READ ? first.entry_block : 0;
+        t->far_header    = far.verdict == DISK_GPT_READ ? far.header_block : 0;
+        t->far_entries   = far.verdict == DISK_GPT_READ ? far.entry_block : 0;
         DiskGptCopy view = *read;
         view.array       = t->entries;
         rc = DiskGptParts(t, &view);

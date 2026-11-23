@@ -24,7 +24,6 @@
 #include "pit.h"
 #include "rtc.h"
 #include "keyboard.h"
-#include "ata.h"
 #include "tagfs.h"
 #include "boardroom.h"
 #include "system_halt.h"
@@ -220,34 +219,9 @@ static int HwRtcGetUptime(const ManifestOp *op, Crate *crates, uint16_t crate_co
  * ========================================================================= */
 
 /* =========================================================================
- *  Disk (ATA primary master/slave info + cache flush)
+ *  Disk: the volumes' media committed. The disks and their tables are
+ *  hardware_disks.c's.
  * ========================================================================= */
-
-/* HW_DISK_INFO  params:[u8 is_master]
- *               out_crate: [u8 exists][char model[40]][char serial[20]]
- *                          [u64 total_sectors][u64 size_mb]   = 77 bytes */
-static int HwDiskInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                      const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < 77) return ERR_BUFFER_TOO_SMALL;
-
-    uint8_t       is_master = op->params[0];
-    ATADevice    *dev       = is_master ? &ata_primary_master : &ata_primary_slave;
-
-    uint8_t blob[77];
-    blob[0] = (uint8_t)dev->exists;
-    memcpy(blob + 1,  dev->model,  40);
-    memcpy(blob + 41, dev->serial, 20);
-    memcpy(blob + 61, &dev->total_sectors, sizeof(uint64_t));
-    memcpy(blob + 69, &dev->size_mb,       sizeof(uint64_t));
-    if (crate_write(out, ctx, blob, 77) != OK) return ERR_INVALID_ADDRESS;
-    return OK;
-}
 
 /* HW_DISK_FLUSH  params:[u8 is_master]
  *
@@ -880,11 +854,16 @@ error_t HardwareDeckRegister(void)
         { HW_RTC_GET_TIME,       HwRtcGetTime,       OP_AUTH_NONE,   "hw.rtc.time"      },
         { HW_RTC_GET_UNIX64,     HwRtcGetUnix64,     OP_AUTH_NONE,   "hw.rtc.unix64"    },
         { HW_RTC_GET_UPTIME,     HwRtcGetUptime,     OP_AUTH_NONE,   "hw.rtc.uptime"    },
-        /* Disk: info is the drive as the driver already knows it, so anyone
-         * may ask. flush commits the whole medium on one caller's say-so —
-         * see HwDiskFlush for why that is a utility's act and not an app's. */
-        { HW_DISK_INFO,          HwDiskInfo,         OP_AUTH_NONE,   "hw.disk.info"     },
+        /* Disk: flush commits the whole medium on one caller's say-so — see
+         * HwDiskFlush for why that is a utility's act and not an app's. The
+         * disks and their tables any program may see; a change of a table is
+         * the person's hands, a box that asks change-disks (hardware_disks.c). */
         { HW_DISK_FLUSH,         HwDiskFlush,        OP_AUTH_UTILITY,"hw.disk.flush"    },
+        { HW_DISKS_LIST,         HwDisksList,        OP_AUTH_APP,    "hw.disks.list"    },
+        { HW_DISK_LAY,           HwDiskLay,          OP_AUTH_APP,    "hw.disk.lay"      },
+        { HW_DISK_ADD,           HwDiskAdd,          OP_AUTH_APP,    "hw.disk.add"      },
+        { HW_DISK_REMOVE,        HwDiskRemove,       OP_AUTH_APP,    "hw.disk.remove"   },
+        { HW_DISK_MEND,          HwDiskMend,         OP_AUTH_APP,    "hw.disk.mend"     },
         /* Screen: the glass is lent to the system program that draws. */
         { HW_SCREEN_CLAIM,       HwScreenClaim,      OP_AUTH_SYSTEM, "hw.screen.claim"  },
         { HW_SCREEN_RELEASE,     HwScreenRelease,    OP_AUTH_SYSTEM, "hw.screen.release"},

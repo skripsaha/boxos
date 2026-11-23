@@ -5,7 +5,7 @@
  *
  * What a program may do is what its box asks for (the part `asks`, box_reader.h
  * BoxAsksRead), and the program's maker says it: each --ask is one word the box
- * asks for — utility, network, see-tags or change-tags. A box packed with none
+ * asks for — utility, network, see-tags, change-tags or change-disks. A box packed with none
  * asks for nothing.
  *
  * What a program is to the machine it is laid on is what its box says of itself
@@ -445,7 +445,7 @@ static size_t WriteAsks(char *text, size_t room, char **words, int count)
     if (unknown != 0) {
         char why[200];
         snprintf(why, sizeof(why), "it asks for a word nobody who starts a program knows (line %llu): utility, "
-                 "network, see-tags or change-tags", (unsigned long long)unknown);
+                 "network, see-tags, change-tags or change-disks", (unsigned long long)unknown);
         Refuse(why);
     }
     return used;

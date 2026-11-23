@@ -1097,6 +1097,7 @@ static error_t process_wear_asked(process_t *proc, uint32_t asked)
         { AUTH_TAG_NETWORK,     "network" },
         { AUTH_TAG_SEE_TAGS,    "see-tags" },
         { AUTH_TAG_CHANGE_TAGS, "change-tags" },
+        { AUTH_TAG_CHANGE_DISKS, "change-disks" },
     };
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         if (!(asked & keys[i].Bit))

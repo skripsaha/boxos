@@ -64,6 +64,9 @@ typedef struct {
     uint32_t       entry_count;
     uint32_t       entry_bytes;
     uint8_t*       entries;             /* entry_count × entry_bytes, as on the medium */
+    uint64_t       first_entries;       /* where each copy lies, as its header says: */
+    uint64_t       far_header;          /* ... 0 of a copy that does not hold */
+    uint64_t       far_entries;
 
     uint32_t       part_count;
     DiskPart*      parts;               /* in the order of their first block */
@@ -82,6 +85,55 @@ void    DiskTableLetGo(DiskTable* t);
 
 /* What was remembered of the seat's disk let go: its next read is the medium's. */
 void    DiskTableForget(uint8_t seat);
+
+/* What stands on a disk a change is asked of, as the one asking knows it — the
+ * room knowing media and not volumes: the first block of every partition a
+ * volume of the house stands on. A disk with any is never laid anew, and none
+ * of them is taken away. */
+typedef struct {
+    uint32_t        count;
+    const uint64_t* firsts;
+} DiskInUse;
+
+/*
+ * The changes (disk_table_write.c), each of the disk a person looked at — its
+ * seat and its seating — and each answered once the table is on the medium
+ * and read back as it was meant. Every one may answer:
+ *   ERR_OBJECT_NOT_FOUND  the seat is empty, or holds another disk since;
+ *   ERR_WOULD_BLOCK       a change of some disk's table is under way;
+ *   ERR_DEVICE_NOT_READY  the medium refused the reads, or left on the way;
+ *   ERR_PERMISSION_DENIED the medium refuses writes: it is protected;
+ *   ERR_WRITE_FAILED      a write was refused, or did not read back;
+ *   ERR_NO_MEMORY.
+ * A cut or a refusal on the way leaves the old table or the new, whole.
+ */
+
+/* A new GPT over the whole disk, no partition in it: ERR_BUSY for a disk a
+ * volume of the house stands on; ERR_INVALID_STATE for a medium that will
+ * not say how far it runs; ERR_OUT_OF_RANGE for one too small for a table
+ * and a partition. */
+error_t DiskTableLay(uint8_t seat, uint32_t seating, const DiskInUse* used);
+
+/* A partition of `kind` — DISK_PART_ESP or DISK_PART_BOXOS — over `blocks`
+ * from `first`, which begins on the grain inside one free run; `entry` (NULL
+ * for none) the place it took. ERR_INVALID_ARGUMENT for another kind;
+ * ERR_INVALID_STATE for a disk with no GPT; ERR_CORRUPTED for one whose
+ * copies are to be mended first; ERR_OUT_OF_RANGE for a run that is not
+ * free; ERR_QUOTA_EXCEEDED for a table with no entry left. */
+error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t first, uint64_t blocks,
+                     uint16_t* entry);
+
+/* BoxOS's partition in `entry` taken away, its run free. ERR_OUT_OF_RANGE
+ * for no partition there; ERR_INVALID_ARGUMENT for one of another kind;
+ * ERR_BUSY for one a volume of the house stands on; ERR_INVALID_STATE and
+ * ERR_CORRUPTED as DiskTableAdd's. */
+error_t DiskTableRemove(uint8_t seat, uint32_t seating, uint16_t entry, const DiskInUse* used);
+
+/* Both copies of a GPT written from the one read — the far one at the end of
+ * the disk, a table made for a smaller one given the blocks it never knew of:
+ * OK, nothing written, when they hold and agree. ERR_INVALID_STATE for a disk
+ * with no GPT that holds, or a medium that will not say how far it runs. */
+error_t DiskTableMend(uint8_t seat, uint32_t seating);
 
 /* The blocks of the grain on `t`'s medium: a mebibyte, or one physical block
  * when that is larger. */
