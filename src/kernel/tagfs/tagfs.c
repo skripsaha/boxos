@@ -2133,6 +2133,10 @@ void TagFSVolumeService(TagFSVolume* vol)
         return;
     }
 
+    /* A volume put away stays in the house, shown by the name the person gave
+     * it: held across the letting go, which forgets everything read, and
+     * given back — the next mount reads it from the book afresh. */
+    UseText* named = vol->mount.putting ? VolumeNameHeld(vol) : NULL;
     if (tagfs_abandon(vol)) {
         /* And now it is an ordinary arrival: nothing is mounted, and there may
          * be a medium in the room carrying the volume this machine had. That
@@ -2141,6 +2145,8 @@ void TagFSVolumeService(TagFSVolume* vol)
          * away it leaves let go of. */
         VolumePuttingAway* putting = vol->mount.putting;
         vol->mount.putting         = NULL;
+        if (putting && named)
+            (void)VolumeNameRecall(vol, (const uint8_t*)named->text, named->bytes);
         attend_arrival(vol);
         TagFSHoldGroundAfterReturn(vol);   /* nothing at all unless HOLDGROUND=on */
         if (putting) {
@@ -2150,6 +2156,7 @@ void TagFSVolumeService(TagFSVolume* vol)
             putting->ended(putting);
         }
     }
+    UseTextDrop(named);
 
     attending_done(vol);
 }
