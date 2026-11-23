@@ -160,6 +160,7 @@ class Content:
         # or None, [(file block, runs)])} — a Tally names it again so (§16.4 п.5).
         self.kept = {}
         self.use = b""
+        self.name = b""
         self.next_fid = self.next_tag = 0
         self.next_bookmark = 1
         self.made_ns = made_ns
@@ -172,6 +173,7 @@ class Content:
         out.digests = dict(c.digests)
         out.kept = dict(c.kept)
         out.use, out.next_fid, out.next_tag, out.next_bookmark = c.use, c.next_fid, c.next_tag, c.next_bookmark
+        out.name = c.name
         return out
 
 
@@ -867,13 +869,28 @@ class Tally:
                 continue
             TagGlass(tid, ts, self.glass)
             c.tags[tid] = ts
-        for _k, body, _s in (self.trees[USE].items if USE in self.trees else [])[:1]:
+        # USE: the Use Context at key 0, the volume's name at key 1 — a key past
+        # them is a later writer's, and the volume stands under glass for it.
+        seen = set()
+        for k, body, _s in (self.trees[USE].items if USE in self.trees else []):
+            if k not in (0, 1):
+                self.glass.append("a USE element of a key this reader does not know")
+                continue
+            if k in seen:
+                continue
+            seen.add(k)
+            what = "the USE element" if k == 0 else "the volume's name"
             cur = Cursor(body)
             try:
-                c.use = cur.Take(cur.V())
-                _Exact(cur, "the USE element", self.glass)
+                text = cur.Take(cur.V())
+                _Exact(cur, what, self.glass)
             except Short as e:
-                self.glass.append("the USE element does not read (%s)" % e)
+                self.glass.append("%s does not read (%s)" % (what, e))
+                continue
+            if k == 0:
+                c.use = text
+            else:
+                c.name = text
         items = self.trees[DIGESTS].items if DIGESTS in self.trees else []
         for i, (first, body, _s) in enumerate(items):
             try:

@@ -53,7 +53,8 @@
 #define RIBBON_USE_CONTEXT   9u
 #define RIBBON_FROZEN       10u
 #define RIBBON_THAWED       11u
-#define RIBBON_KINDS_KNOWN  11u
+#define RIBBON_VOLUME_NAME  12u
+#define RIBBON_KINDS_KNOWN  12u
 
 /* StitchHead.flags (§2.7). */
 #define STITCH_DATA_FLUSHED  1u   /* the cycle paid its first flush before the stitch */
@@ -108,10 +109,11 @@
  *   UseContext "work,play"
  *   Frozen     id 1, scope mode 1 over ids 2, 3, "snap"
  *   Thawed     id 1
+ *   VolumeName "photos", ignorable
  *   kind 31, ignorable, body 07
- * and its Clasp: 10 records, 2 fresh blocks, and the stream's sum.
+ * and its Clasp: 11 records, 2 fresh blocks, and the stream's sum.
  */
-#define RIBBON_GOLDEN_STITCH_CRC  0xD5743D56u
+#define RIBBON_GOLDEN_STITCH_CRC  0x8E094A45u
 
 /* ------------------------------------------------------------------------- */
 /* A record, and the lists inside one                                         */
@@ -881,7 +883,11 @@ static inline int RibbonCoinedGet(const uint8_t *b, uint32_t len, uint64_t *id, 
 }
 
 /* UseContext — the volume's Use Context whole: len · text (§7); TallyUsePut
- * and TallyUseGet are its codec, the same the Tally's USE element keeps. */
+ * and TallyUseGet are its codec, the same the Tally's USE element keeps.
+ * VolumeName — the name a person gave the volume, whole: len · text, the same
+ * codec, the same the Tally's USE element (1, 0) keeps; len 0 takes the name
+ * away. Laid ignorable: a reader that does not know it steps over it, as the
+ * name is nothing a file of the volume depends on. */
 
 /* Undone — a mount's verdict that outlives the next mount (H-1): seq_back ·
  * why · fids (count, rising) — every record of these fids in the stitch

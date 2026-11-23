@@ -69,6 +69,7 @@ typedef struct {
  * ==================================================================== */
 
 extern uint32_t g_medium_block;    /* the block the image's medium is addressed in: 512, or 4096 on 4Kn */
+extern const char* g_volume_name;  /* the name --name gives the volume (TallyNameSpelled); NULL for none */
 extern uint64_t g_ground_start;    /* first sector of the volume's ground */
 extern uint64_t g_ground_sectors;  /* how far it runs */
 

@@ -332,6 +332,8 @@ static error_t BookWalk(TagFSVolume* vol, const char** what)
     }
     if (rc == OK && !use)
         rc = BookUseRecalled(vol, NULL, 0);
+    if (rc == OK && !use)
+        rc = VolumeNameRecall(vol, NULL, 0);
     if (rc != OK)
         *what = rc == ERR_NO_MEMORY ? "there is no memory to hold what its Tally names"
                                     : "its medium would not give up its Tally";

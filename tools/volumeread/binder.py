@@ -173,7 +173,8 @@ def Elements(content, seq, refs=()):
             files.append(((fid, 1 + at), ParcelEncode(runs, seq)))
             at += sum(r.count for r in runs)
     out = {FILES: files, TAGS: [(tid, TagEncode(content.tags[tid])) for tid in sorted(content.tags)],
-           USE: [(0, VarintPut(len(content.use)) + content.use)] if content.use else [],
+           USE: ([(0, VarintPut(len(content.use)) + content.use)] if content.use else [])
+                + ([(1, VarintPut(len(content.name)) + content.name)] if content.name else []),
            DIGESTS: DigestItems(content.digests, refs)}
     kept = [r for r in refs if isinstance(r, Kept)]
     for tree in out:
@@ -568,12 +569,13 @@ def Useful(u):
     return u.parsed.end if u.parsed and u.parsed.why is None else 0
 
 
-def Lives(files, tags, use, held=()):
-    """Whether a key of the state of `files`, `tags` and `use` lies in the
+def Lives(files, tags, use, held=(), name=b""):
+    """Whether a key of the state of `files`, `tags`, `use` and `name` lies in the
     range [lo, hi) of a leaf of a tree — lo None from its first key, hi None
     to its end (settle/binder_live.c, §16.6 п.6): of FILES, a live file's id
     among the ids the leaf holds keys of, its upper key's file too when it
-    ends inside it; of TAGS, a tag's id; of USE, a Use Context; of DIGESTS, a
+    ends inside it; of TAGS, a tag's id; of USE, a Use Context or a volume's
+    name; of DIGESTS, a
     block of a live file's ground or of `held` — runs a locked file is known
     to name, held for what rotted — as DIGESTS speaks for both
     (_DigestsWanted). The kernel tells the last by its block map, past the
@@ -599,7 +601,7 @@ def Lives(files, tags, use, held=()):
         if tree == TAGS:
             return Within(tids, lo if lo is not None else 0, hi)
         if tree == USE:
-            return bool(use)
+            return bool(use) or bool(name)
         if tree == DIGESTS:
             i = bisect.bisect_left(starts, hi) if hi is not None else len(starts)
             return i > 0 and reach[i - 1] > (lo if lo is not None else 0)
@@ -620,7 +622,7 @@ def BindSaid(m):
     whole = (2 * blocks + 1) * BLOCK
     held = [(r.start, r.count) for fid, runs in m.locked_runs.items() if fid in m.locked for r in runs
             if not r.hole]
-    tip = TipInBlocks(m.tally, m.dog_ear, Lives(m.files, m.tags, m.use, held))
+    tip = TipInBlocks(m.tally, m.dog_ear, Lives(m.files, m.tags, m.use, held, m.name))
     cost = (2 * tip + 1) * BLOCK if tip < blocks else whole
     return blocks, cost, whole, sum(Useful(u) for u in m.ribbon.stitches)
 
@@ -656,6 +658,8 @@ def BindCheck(medium, start=None):
                 sorted(set(tags) ^ set(want))[:8], [i for i in tags if i in want and tags[i] != want[i]][:8]))
         if t.use != p.use:
             wrong.append("the Tally's Use Context is %u byte(s), the state's %u" % (len(t.use), len(p.use)))
+        if t.name != p.name:
+            wrong.append("the Tally's volume name is %u byte(s), the state's %u" % (len(t.name), len(p.name)))
         dw = _DigestsWanted(p, gone, g)
         odd = sorted(b for b in set(t.digests) | set(dw) if t.digests.get(b) != dw.get(b))
         if odd:

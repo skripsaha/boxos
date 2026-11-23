@@ -151,6 +151,10 @@ static void TallyCostOf(TagFSVolume* vol, TallyCostParts* out)
     if (memory && memory->bytes)
         TallyItemCost(&use, TALLY_USE_BODY_MOST + memory->bytes);
     UseTextDrop(memory);
+    UseText* name = VolumeNameHeld(vol);
+    if (name && name->bytes)
+        TallyItemCost(&use, TALLY_USE_BODY_MOST + name->bytes);
+    UseTextDrop(name);
     out->files   = TallyTreeBlocks(&files, atom);
     out->tags    = TallyTreeBlocks(&tags, atom);
     out->use     = TallyTreeBlocks(&use, atom);

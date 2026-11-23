@@ -426,15 +426,27 @@ static int DigestLeaves(Binding* v) {
     return 0;
 }
 
-/* Every leaf element of the Tally, and the ground's grain and atom. USE is
- * not among them: a new volume remembers no Use Context, and an empty tree
- * is not written (§1.4). 0, or -1 having said why. */
+/* USE: the volume's name, at key (1, 0), when --name gave it one. A new volume
+ * remembers no Use Context (key (0, 0)), and a volume with neither has no USE
+ * — an empty tree is not written (§1.4). 0, or -1. */
+static int UseLeaves(Binding* v) {
+    BindLeaves* l = &v->leaves;
+    if (!g_volume_name) return 0;
+    uint64_t n    = strlen(g_volume_name);
+    uint8_t* body = BindBody(l, 10u + n);
+    if (!body) return -1;
+    uint32_t len = TallyUsePut(body, (const uint8_t*)g_volume_name, n);
+    return BindAdd(l, TALLY_USE, (TallyKey){ 1, 0 }, body, len, 1);
+}
+
+/* Every leaf element of the Tally, and the ground's grain and atom. 0, or -1
+ * having said why. */
 static int BindingLeaves(Binding* v) {
     VolumeGeometry geo = DeedGeometry();
     v->leaves.grain = geo.grain_bytes / TAGFS_BLOCK_SIZE;
     v->leaves.grid  = geo.physical_bytes > TAGFS_BLOCK_SIZE ? geo.physical_bytes / TAGFS_BLOCK_SIZE : 1u;
     v->leaves.seq   = FIRST_TALLY_SEQ;
-    if (FileLeaves(v) != 0 || TagLeaves(v) != 0 || DigestLeaves(v) != 0) {
+    if (FileLeaves(v) != 0 || TagLeaves(v) != 0 || UseLeaves(v) != 0 || DigestLeaves(v) != 0) {
         fprintf(stderr, "No memory for the elements of the Tally\n");
         return -1;
     }

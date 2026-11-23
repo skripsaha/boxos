@@ -6,6 +6,7 @@
 #include "../mount/book_mount.h"
 #include "../tag_registry/tag_registry.h"
 #include "../use_memory/use_memory.h"
+#include "../volume/volume_name.h"
 #include "../block_map/block_map_derived.h"
 #include "../ink/ink.h"
 #include "../ink/fallow.h"
@@ -612,6 +613,158 @@ out:
 }
 
 // ----------------------------------------------------------------------------
+// The volume's name: carried once, kept by the book, taken away (2d)
+// ----------------------------------------------------------------------------
+
+/* The name `text` (NULL takes it away) said to the volume — the person's word
+ * by the road a caller in the kernel takes (SettleVolumeNamed): its answer,
+ * and in *ticket what its refusal is asked by. */
+static error_t StandStitchName(TagFSVolume* vol, const char* text, uint64_t* ticket)
+{
+    UseText* said = NULL;
+    error_t  rc   = VolumeNameAsk(vol, text, text ? strlen(text) : 0, &said);
+    *ticket       = 0;
+    if (rc != OK || VolumeNameHolds(vol, said)) {
+        UseTextDrop(said);
+        return rc;
+    }
+    *ticket = VolumeNameSay(vol, said);
+    rc      = TagFSSettle(vol);
+    return rc == OK && VolumeNameRefused(vol, *ticket) ? ERR_TAGFS_NO_SPACE : rc;
+}
+
+/* Whether the volume's name is `text` — none for NULL. */
+static bool StandStitchNamed(TagFSVolume* vol, const char* text)
+{
+    char   name[TALLY_VOLUME_NAME_MOST];
+    size_t n    = VolumeNameOf(vol, name, sizeof(name));
+    size_t want = text ? strlen(text) : 0;
+    return n == want && (!n || memcmp(name, text, n) == 0);
+}
+
+/*
+ * A name given the volume is carried whole by the next stitch, as a
+ * VolumeName laid ignorable; the same name again lays nothing; the mount
+ * after recalls it; a name taken away is an empty VolumeName, and the mount
+ * after recalls none. What is not a name — bytes that are no UTF-8, a
+ * control character, one byte past TALLY_VOLUME_NAME_MOST — is refused before
+ * any cycle is asked.
+ */
+static TestResult TestStandStitchVolumeName(void)
+{
+    TagFSVolume* vol = TagFSHome();
+    TestResult   verdict = TEST_PASS;
+    StandStitch  s;
+    RibbonUnit*  u      = NULL;
+    uint64_t     ticket = 0;
+    uint8_t      body[TALLY_VOLUME_NAME_MOST + 16u];
+    char         longest[TALLY_VOLUME_NAME_MOST + 2u];
+    const char*  aside = StandStitchAside(vol, &s);
+    static const char named[] = "Фото 2026 — дача";
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT_OK(StandStitchName(vol, named, &ticket), "a name is given the volume");
+    TEST_ASSERT(StandStitchNamed(vol, named), "and the volume is called it");
+    TEST_ASSERT(StandStitchRead(vol, &u), "the stitch its cycle sewed reads back whole");
+    uint32_t len = TallyUsePut(body, (const uint8_t*)named, sizeof(named) - 1u);
+    TEST_ASSERT(StandStitchCarries(u, RIBBON_VOLUME_NAME, body, len), "and carries the name whole, as VolumeName");
+    for (uint32_t i = 0; i < u->nrecords; i++)
+        if (u->records[i].kind == RIBBON_VOLUME_NAME)
+            TEST_ASSERT(u->records[i].ignorable, "laid ignorable: no file of the volume depends on it");
+    RibbonUnitLetGo(u);
+    u = NULL;
+
+    uint64_t cycles = SettledCycles(vol);
+    BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
+    TEST_ASSERT_OK(StandStitchName(vol, named, &ticket), "the same name is given again");
+    TEST_ASSERT_EQ(BlockFailSeen(), 0, "with not one write: what the book holds is not written again");
+    TEST_ASSERT_EQ(SettledCycles(vol), cycles, "and no cycle asked for it");
+    BlockFailDisarm();
+
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
+    TEST_ASSERT(StandStitchNamed(vol, named), "and recalls the name the ribbon's last VolumeName says");
+
+    memset(longest, 'n', sizeof(longest) - 1u);
+    longest[sizeof(longest) - 1u] = '\0';
+    TEST_ASSERT_EQ(StandStitchName(vol, longest, &ticket), ERR_INVALID_ARGUMENT,
+                   "a name one byte longer than TALLY_VOLUME_NAME_MOST is refused");
+    TEST_ASSERT_EQ(StandStitchName(vol, "tab\there", &ticket), ERR_INVALID_ARGUMENT,
+                   "so is one with a control character");
+    TEST_ASSERT_EQ(StandStitchName(vol, "\xC0\xAF", &ticket), ERR_INVALID_ARGUMENT,
+                   "and one whose character is spelled longer than it is");
+    TEST_ASSERT_EQ(StandStitchName(vol, "\xED\xA0\x80", &ticket), ERR_INVALID_ARGUMENT,
+                   "and half of a pair");
+    TEST_ASSERT(StandStitchNamed(vol, named), "each leaving the name the volume has");
+    longest[TALLY_VOLUME_NAME_MOST] = '\0';
+    TEST_ASSERT_OK(StandStitchName(vol, longest, &ticket), "a name of TALLY_VOLUME_NAME_MOST bytes is given");
+    TEST_ASSERT(StandStitchNamed(vol, longest), "and the volume is called it, whole");
+
+    TEST_ASSERT_OK(StandStitchName(vol, NULL, &ticket), "the name is taken away");
+    TEST_ASSERT(StandStitchNamed(vol, NULL), "and the volume is called nothing");
+    TEST_ASSERT(StandStitchRead(vol, &u), "the stitch its cycle sewed reads back whole");
+    len = TallyUsePut(body, NULL, 0);
+    TEST_ASSERT(StandStitchCarries(u, RIBBON_VOLUME_NAME, body, len), "and carries an empty VolumeName");
+    RibbonUnitLetGo(u);
+    u = NULL;
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
+    TEST_ASSERT(StandStitchNamed(vol, NULL), "and recalls no name");
+out:
+    RibbonUnitLetGo(u);
+    BlockFailDisarm();
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+/*
+ * A name with no room on the ribbon is refused, and the volume keeps the name
+ * it had — in memory, on the medium and at the mount after: a name is not
+ * forgotten for want of room, as no file is. The name goes first: the
+ * person's word that left no room either is refused after it (TestStandStitch
+ * UseForgotten), and the stitch laid carries no VolumeName at all.
+ */
+static TestResult TestStandStitchVolumeNameNoRoom(void)
+{
+    TagFSVolume* vol = TagFSHome();
+    TestResult   verdict = TEST_PASS;
+    StandStitch  s;
+    RibbonCursor l;
+    RibbonUnit*  u      = NULL;
+    UseText*     said   = NULL;
+    uint64_t     ticket = 0;
+    bool         kept   = false;
+    uint8_t      body[32];
+    const char*  aside = StandStitchAside(vol, &s);
+    static const char old_name[] = "old name";
+    static const char new_name[] = "new name";
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT_OK(StandStitchName(vol, old_name, &ticket), "a name is given the volume");
+    TEST_ASSERT_OK(VolumeNameAsk(vol, new_name, sizeof(new_name) - 1u, &said), "another name is asked");
+    ticket = VolumeNameSay(vol, said);
+    RibbonCursorStand(vol, &l);
+    uint64_t room = l.quire.blocks * TAGFS_BLOCK_SECTORS - l.off + l.next.blocks * TAGFS_BLOCK_SECTORS;
+    TEST_ASSERT_EQ(StandStitchSayFilling(vol, room, 'n', 2, &kept), ERR_TAGFS_NO_SPACE,
+                   "with it owed, a word whose stitch would fill the rest of the ribbon is refused");
+    TEST_ASSERT(VolumeNameRefused(vol, ticket), "the name owed with it is refused for want of room");
+    TEST_ASSERT(StandStitchNamed(vol, old_name), "and the volume keeps the name it had");
+    TEST_ASSERT(StandStitchRead(vol, &u), "the stitch the cycle sewed reads back whole");
+    uint32_t len = TallyUsePut(body, (const uint8_t*)new_name, sizeof(new_name) - 1u);
+    TEST_ASSERT(!StandStitchCarries(u, RIBBON_VOLUME_NAME, body, len), "and carries no VolumeName of the new name");
+    len = TallyUsePut(body, NULL, 0);
+    TEST_ASSERT(!StandStitchCarries(u, RIBBON_VOLUME_NAME, body, len), "nor an empty one");
+    RibbonUnitLetGo(u);
+    u = NULL;
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
+    TEST_ASSERT(StandStitchNamed(vol, old_name), "and is called the name it kept");
+out:
+    RibbonUnitLetGo(u);
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
 // M-6: no Quire takes the write — the volume may only be read, its waiters
 // told; the attempt torn on the medium is the ribbon's torn tail (§3.2, §3.9)
 // ----------------------------------------------------------------------------
@@ -992,6 +1145,10 @@ static const TestCase g_stand_stitch_tests[] = {
     { .name = "stand_stitch_use_forgotten", .func = TestStandStitchUseForgotten,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_use_later_word_stands", .func = TestStandStitchUseLaterWordStands,
+      .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_stitch_volume_name", .func = TestStandStitchVolumeName,
+      .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_stitch_volume_name_no_room", .func = TestStandStitchVolumeNameNoRoom,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_coined", .func = TestStandStitchCoined,
       .reach = TEST_WRITES_TO_VOLUME },

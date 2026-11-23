@@ -16,7 +16,7 @@
 
 static const char* const g_kind_names[RIBBON_KINDS_KNOWN + 1u] = {
     "record", "StitchHead", "Clasp", "Undone", "Born", "Shaped", "Labeled", "Quitclaim", "Coined",
-    "UseContext", "Frozen", "Thawed",
+    "UseContext", "Frozen", "Thawed", "VolumeName",
 };
 
 
@@ -844,6 +844,15 @@ error_t RibbonRecordApplied(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st,
             st->use_set = true;
             st->use     = text;
             st->use_len = n;
+        }
+        return OK;
+    }
+    case RIBBON_VOLUME_NAME: {
+        int got = TallyUseGet(b, r->len, &text, &n);
+        if (RibbonBodyTaken(st, r->kind, got, r->len, got == TALLY_BODY_BROKEN ? 0 : TallyVarintBytes(n) + (uint32_t)n)) {
+            st->name_set = true;
+            st->name     = text;
+            st->name_len = n;
         }
         return OK;
     }

@@ -48,7 +48,7 @@
 /* The trees of a Tally (§2.9), each the `tree` of its nodes and SpineRoot. */
 #define TALLY_FILES      1u   /* (fid, part): a file's header, part 0, and its Parcels, part 1 + b */
 #define TALLY_TAGS       2u   /* tag id: its flags and text                                          */
-#define TALLY_USE        3u   /* 0: the volume's Use Context                                         */
+#define TALLY_USE        3u   /* 0: the volume's Use Context; 1: its name, as a person gave it       */
 #define TALLY_BOOKMARKS  4u
 #define TALLY_LIEN       5u   /* (holder id, start)                                                  */
 #define TALLY_DIGESTS    6u   /* first block: the digests of blocks in a row                         */
@@ -882,6 +882,33 @@ static inline int TallyUseGet(const uint8_t *b, uint32_t len, const uint8_t **te
     if (!TallyTake(b, len, &at, text_len) || !TallyTakeBytes(b, len, &at, *text_len, text))
         return TALLY_BODY_BROKEN;
     return TallyBodyEnd(at, len);
+}
+
+/* The volume's name (USE, key (1, 0)) is the same len · text, and is a name
+ * only spelled as one: at most TALLY_VOLUME_NAME_MOST bytes — a line's worth
+ * of a list it is shown in, in any language — of UTF-8 whole (no byte that
+ * leads nothing, no character spelled longer than it is, none past U+10FFFF
+ * nor a half of a pair) with no control character in it. The one rule the
+ * kernel gives a name by and the volume's maker lays one by. */
+#define TALLY_VOLUME_NAME_MOST  255u
+
+static inline int TallyNameSpelled(const uint8_t *b, uint64_t len)
+{
+    static const uint32_t least[4] = { 0, 0x80u, 0x800u, 0x10000u };
+    if (len > TALLY_VOLUME_NAME_MOST) return 0;
+    for (uint64_t at = 0; at < len;) {
+        uint32_t c    = b[at];
+        uint32_t more = c < 0x80u ? 0 : (c & 0xE0u) == 0xC0u ? 1 : (c & 0xF0u) == 0xE0u ? 2 : (c & 0xF8u) == 0xF0u ? 3 : 4;
+        if (more == 4 || at + more >= len) return 0;
+        c &= more == 0 ? 0x7Fu : more == 1 ? 0x1Fu : more == 2 ? 0x0Fu : 0x07u;
+        for (uint32_t i = 1; i <= more; i++) {
+            if ((b[at + i] & 0xC0u) != 0x80u) return 0;
+            c = (c << 6) | (b[at + i] & 0x3Fu);
+        }
+        if (c < least[more] || c > 0x10FFFFu || (c >= 0xD800u && c <= 0xDFFFu) || c < 0x20u || c == 0x7Fu) return 0;
+        at += 1u + more;
+    }
+    return 1;
 }
 
 /* DIGESTS: n · n × u64 LE, the digests of blocks in a row from the key. */

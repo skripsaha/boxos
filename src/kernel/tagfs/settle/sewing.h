@@ -421,6 +421,10 @@ typedef struct {
     uint64_t    use_ticket;
     bool        use_out;      /* the word had no room on the ribbon: the stitch is laid without it */
     bool        use_forgot;   /* ... and forgets the word the book held: an empty UseContext in its place */
+    bool        name_owed;    /* a name a person gave the volume is owed the medium (volume/volume_name.c) */
+    UseText*    name;         /* that name, held; NULL takes the name away */
+    uint64_t    name_ticket;
+    bool        name_out;     /* the name had no room on the ribbon: the stitch is laid without it, the old kept */
     DocketTaken jots;         /* the files' changes up to the target, by fid */
     uint64_t    claimed;      /* the ribbon's bytes their Inks claimed, taken (RibbonClaimTaken) */
     uint64_t    flight;       /* the sectors TAKE counted it in flight at the most (StitchFlight) */

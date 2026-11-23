@@ -208,6 +208,7 @@ static error_t TallySliceTake(TagFSVolume* vol, BinderRun* r)
     w->tag_hi  = lo;
     w->tag_gen = SettledGen(vol);
     w->use    = tagfs_recall_use_context(vol, NULL);
+    w->name   = VolumeNameHeld(vol);
     w->grid   = vol->book.atom > TAGFS_BLOCK_SIZE ? vol->book.atom / TAGFS_BLOCK_SIZE : 1u;
     w->seq    = RibbonSeqNext(vol);
     error_t rc = BinderTipInTake(vol, r);

@@ -21,7 +21,7 @@ static const uint32_t g_golden_add[]    = { 9 };
 static const uint32_t g_golden_drop[]   = { 3 };
 static const uint32_t g_golden_scope[]  = { 2, 3 };
 
-#define RIBBON_TEST_RECORDS  10u
+#define RIBBON_TEST_RECORDS  11u
 
 /* Where each of the golden stitch's records lies in its stream: the record,
  * and its body. */
@@ -140,7 +140,9 @@ static uint32_t RibbonTestRecords(uint8_t *out, uint32_t at, RibbonTestRecord *r
     at += RibbonTestLay(out, at, RIBBON_FROZEN, 0, body, n, &rec[7]);
     n   = BookVarintPut(body, 1);
     at += RibbonTestLay(out, at, RIBBON_THAWED, 0, body, n, &rec[8]);
-    at += RibbonTestLay(out, at, 31, 1, &one, 1, &rec[9]);
+    n   = TallyUsePut(body, (const uint8_t *)"photos", 6);
+    at += RibbonTestLay(out, at, RIBBON_VOLUME_NAME, 1, body, n, &rec[9]);
+    at += RibbonTestLay(out, at, 31, 1, &one, 1, &rec[10]);
     return at;
 }
 
@@ -215,7 +217,8 @@ static int RibbonTestGet(uint64_t kind, const uint8_t *b, uint32_t len, uint32_t
     case RIBBON_QUITCLAIM:   return RibbonQuitclaimGet(b, len, &x, &y, used);
     case RIBBON_FROZEN:      return RibbonFrozenGet(b, len, &x, used);
     case RIBBON_THAWED:      return RibbonThawedGet(b, len, &x, used);
-    case RIBBON_USE_CONTEXT: {
+    case RIBBON_USE_CONTEXT:
+    case RIBBON_VOLUME_NAME: {
         int got = TallyUseGet(b, len, &text, &x);
         *used = got == TALLY_BODY_BROKEN ? 0 : TallyVarintBytes(x) + (uint32_t)x;
         return got;

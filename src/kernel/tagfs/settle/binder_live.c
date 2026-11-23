@@ -94,8 +94,10 @@ static bool TagsLive(TagFSVolume* vol, const TallyPlace* p, bool first)
 static bool UseLives(TagFSVolume* vol)
 {
     UseText* u    = tagfs_recall_use_context(vol, NULL);
-    bool     live = u && u->bytes;
+    UseText* name = VolumeNameHeld(vol);
+    bool     live = (u && u->bytes) || (name && name->bytes);
     UseTextDrop(u);
+    UseTextDrop(name);
     return live;
 }
 

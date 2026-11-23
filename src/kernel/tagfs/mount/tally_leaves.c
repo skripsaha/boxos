@@ -780,6 +780,7 @@ error_t BookRangeRotsLaid(TagFSVolume* vol, const TallyPlace* at, const char* wh
 typedef struct {
     uint64_t tree;
     bool     use_seen;
+    bool     name_seen;
 } LeavesWalk;
 
 bool BookTagHeld(TagFSVolume* vol, uint64_t tid, const TallyTag* t)
@@ -892,24 +893,32 @@ static error_t LeavesTag(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_
 }
 
 /* The Use Context: the tree's one element, key 0. */
+/* USE: the Use Context at key (0, 0), the volume's name at (1, 0). A key past
+ * them is one a later writer laid that this kernel would not lay again, and
+ * the volume stands under glass rather than lose it. */
 static error_t LeavesUse(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
     const uint8_t* text = NULL;
     uint64_t       n    = 0;
     LeavesWalk*    walk = (LeavesWalk*)ctx;
-    (void)key;
     (void)seq;
-    if (walk->use_seen)
+    if (key.k1 > 1 || key.k2 != 0) {
+        TagFSUnderGlass(vol, "a USE element of a key this kernel does not know");
         return OK;
-    walk->use_seen = true;
+    }
+    bool* seen = key.k1 == 0 ? &walk->use_seen : &walk->name_seen;
+    if (*seen)
+        return OK;
+    *seen = true;
+    const char* what = key.k1 == 0 ? "the USE element" : "the volume's name";
     int got = TallyUseGet(body, len, &text, &n);
     if (got == TALLY_BODY_BROKEN) {
-        TagFSUnderGlass(vol, "the USE element does not read");
+        TagFSUnderGlass(vol, key.k1 == 0 ? "the USE element does not read" : "the volume's name does not read");
         return OK;
     }
     if (got == TALLY_BODY_LONGER)
-        LeavesLonger(vol, "the USE element", len - (TallyVarintBytes(n) + (uint32_t)n));
-    return BookUseRecalled(vol, text, n);
+        LeavesLonger(vol, what, len - (TallyVarintBytes(n) + (uint32_t)n));
+    return key.k1 == 0 ? BookUseRecalled(vol, text, n) : VolumeNameRecall(vol, text, n);
 }
 
 static error_t LeavesNone(TagFSVolume* vol, void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
@@ -956,7 +965,7 @@ error_t BookTagsRotLaid(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, c
 
 error_t TallyLeaves(TagFSVolume* vol, uint64_t tree, const SpineRoot* root)
 {
-    LeavesWalk walk = { tree, false };
+    LeavesWalk walk = { tree, false, false };
     TallySink  sink = {
         .ctx    = &walk,
         .item   = tree == TALLY_FILES ? LeavesFile
@@ -973,5 +982,7 @@ error_t TallyLeaves(TagFSVolume* vol, uint64_t tree, const SpineRoot* root)
         rc = BookFileClose(vol);
     if (rc == OK && tree == TALLY_USE && !walk.use_seen)
         rc = BookUseRecalled(vol, NULL, 0);
+    if (rc == OK && tree == TALLY_USE && !walk.name_seen)
+        rc = VolumeNameRecall(vol, NULL, 0);
     return rc;
 }

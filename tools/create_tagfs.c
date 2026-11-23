@@ -32,7 +32,7 @@
 
 static int Usage(const char* self)
 {
-    fprintf(stderr, "Usage: %s [--block <bytes>] [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
+    fprintf(stderr, "Usage: %s [--block <bytes>] [--name <name>] [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
     fprintf(stderr, "       %s --ground [--kernel <file>] [<file> <tags>] ...\n", self);
     fprintf(stderr, "       %s --frame-only [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
     fprintf(stderr, "\n");
@@ -46,6 +46,10 @@ static int Usage(const char* self)
     fprintf(stderr, "--block is the block the image's medium is addressed in\n");
     fprintf(stderr, "(4096 for a 4Kn medium, 512 by default): its partition\n");
     fprintf(stderr, "table counts in it.\n");
+    fprintf(stderr, "--name is the name the person gives the volume: UTF-8 of any\n");
+    fprintf(stderr, "language, at most %u bytes, no control character; kept\n", TALLY_VOLUME_NAME_MOST);
+    fprintf(stderr, "in its book, it goes with the volume. With none, the volume\n");
+    fprintf(stderr, "is shown by its medium.\n");
     return 1;
 }
 
@@ -66,6 +70,26 @@ static int BlockOptionTake(int* argc, char* argv[])
     return 1;
 }
 
+const char* g_volume_name;
+
+/* The option --name <name> at argv[1], taken out of the arguments when it is
+ * there: the name the book is laid with. False for one with no name after it,
+ * or one not spelled as a name (TallyNameSpelled), said. */
+static int NameOptionTake(int* argc, char* argv[])
+{
+    if (*argc < 2 || strcmp(argv[1], "--name") != 0) return 1;
+    if (*argc < 3) return 0;
+    if (!argv[2][0] || !TallyNameSpelled((const uint8_t*)argv[2], strlen(argv[2]))) {
+        fprintf(stderr, "--name \"%s\" is not a name: UTF-8, at most %u bytes, no control character\n", argv[2],
+                TALLY_VOLUME_NAME_MOST);
+        return 0;
+    }
+    g_volume_name = argv[2];
+    for (int i = 1; i + 2 < *argc + 1; i++) argv[i] = argv[i + 2];
+    *argc -= 2;
+    return 1;
+}
+
 /* The option --kernel <file> at argv[at], taken out of the arguments when it
  * is there: the file is named to the cargo, and the arguments after it move
  * up. False when the option has no file after it. */
@@ -80,8 +104,11 @@ static int KernelOptionTake(int* argc, char* argv[], int at)
 }
 
 int main(int argc, char* argv[]) {
-    if (!BlockOptionTake(&argc, argv)) return Usage(argv[0]);
-    /* --ground answers a question about a file list and touches no medium. */
+    if (!BlockOptionTake(&argc, argv) || !NameOptionTake(&argc, argv)) return Usage(argv[0]);
+    /* --ground answers a question about a file list and touches no medium;
+     * --frame-only writes no book a name would be kept in. */
+    if (g_volume_name && argc >= 2 && (strcmp(argv[1], "--ground") == 0 || strcmp(argv[1], "--frame-only") == 0))
+        return Usage(argv[0]);
     if (argc >= 2 && strcmp(argv[1], "--ground") == 0) {
         if (!KernelOptionTake(&argc, argv, 2) || (argc - 2) % 2 != 0) return Usage(argv[0]);
         return GroundSay((argc - 2) / 2, argv, 2);

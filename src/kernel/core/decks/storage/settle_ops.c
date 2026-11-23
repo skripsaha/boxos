@@ -49,6 +49,7 @@
 #include "settle.h"
 #include "ink.h"
 #include "use_memory.h"
+#include "volume_name.h"
 #include "escheat.h"
 #include "conjugate.h"
 #include "async/write_job.h"   /* StorageCallWarrant */
@@ -59,6 +60,7 @@ typedef enum {
     SETTLE_OP_ANCHOR = 0,
     SETTLE_OP_SETTLED,
     SETTLE_OP_USE,
+    SETTLE_OP_NAME,
     SETTLE_OP_ROOM,
 } SettleOpKind;
 
@@ -70,7 +72,7 @@ typedef struct {
     uint64_t     file_id;        /* as the house names it: the chit's word */
     TagFSVolume* vol;            /* the volume whose cycle it waits for */
     uint8_t      kind;           /* SettleOpKind */
-    uint64_t     ticket;         /* USE: the demand the word is (UseMemorySay) */
+    uint64_t     ticket;         /* USE: the demand the word is (UseMemorySay); NAME: the name (VolumeNameSay) */
     UseText*     said;           /* USE: the word, held until the answer */
     Crate*       out;            /* USE: the out crate, inside the staged crates */
     Crate*       crates_kbuf;    /* the staged crates, released with the answer */
@@ -155,6 +157,8 @@ static void SettleOpAnswered(SettleWaiter* w, error_t rc)
         if (s->out && vmm && vmm_user_buf_commit_out(vmm, (uintptr_t)s->out->addr, &kept, 1) == OK)
             s->out->size = 1;
         answer = OK;
+    } else if (s->kind == SETTLE_OP_NAME) {
+        answer = rc == OK && VolumeNameRefused(s->vol, s->ticket) ? ERR_TAGFS_NO_SPACE : rc;
     } else if (s->kind != SETTLE_OP_ROOM) {
         SettleOpSay(s->kind, s->file_id, pid, rc);
     }
@@ -372,6 +376,36 @@ int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Cr
         }
     }
     tagfs_leave(TagFSHome());
+    return rc;
+}
+
+int SettleVolumeNamed(TagFSVolume *vol, const char *text, size_t len, const OpContext *ctx, Crate *crates)
+{
+    if (!tagfs_enter(vol))
+        return ERR_TAGFS_NOT_INITIALIZED;
+    UseText* said = NULL;
+    error_t  rc   = VolumeNameAsk(vol, text, len, &said);
+    if (rc == OK && VolumeNameHolds(vol, said)) {
+        UseTextDrop(said);
+    } else if (rc == OK && (!ctx || !ctx->proc)) {
+        uint64_t ticket = VolumeNameSay(vol, said);
+        rc = TagFSSettle(vol);
+        if (rc == OK && VolumeNameRefused(vol, ticket))
+            rc = ERR_TAGFS_NO_SPACE;
+    } else if (rc == OK) {
+        /* Parked before the name is owed: a program told it could not wait
+         * has said nothing to the volume. */
+        SettleOpWait* s = SettleOpPark(ctx, crates, SETTLE_OP_NAME, vol, 0, "storage.volume.name");
+        if (s) {
+            s->ticket = VolumeNameSay(vol, said);
+            SettleWaitLinkCycle(vol, &s->w, SettleOpAnswered);
+            rc = ERR_WOULD_BLOCK;
+        } else {
+            UseTextDrop(said);
+            rc = ERR_NO_MEMORY;
+        }
+    }
+    tagfs_leave(vol);
     return rc;
 }
 

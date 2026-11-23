@@ -336,18 +336,29 @@ static error_t TagsNext(TagFSVolume* vol, BinderWork* w, BinderItem* it, bool* g
     return OK;
 }
 
-/* USE: the Use Context, when there is one. */
+/* USE: the Use Context at key (0, 0), when there is one, then the volume's
+ * name at (1, 0), when it has one — each a word whole. */
 static error_t UseNext(BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems* p = &w->items;
-    *got = !p->use && w->use && w->use->bytes;
-    p->use = true;
+    const UseText* word = NULL;
+    uint64_t       key  = 0;
+    if (!p->use) {
+        p->use = true;
+        word   = w->use && w->use->bytes ? w->use : NULL;
+    }
+    if (!word && !p->name) {
+        p->name = true;
+        word    = w->name && w->name->bytes ? w->name : NULL;
+        key     = 1;
+    }
+    *got = word != NULL;
     if (!*got)
         return OK;
-    if (!ItemRoom(p, 10u + w->use->bytes))
+    if (!ItemRoom(p, 10u + word->bytes))
         return ERR_NO_MEMORY;
-    *it = (BinderItem){ .key = { 0, 0 }, .count = 1, .body = p->buf,
-                        .len = TallyUsePut(p->buf, (const uint8_t*)w->use->text, w->use->bytes) };
+    *it = (BinderItem){ .key = { key, 0 }, .count = 1, .body = p->buf,
+                        .len = TallyUsePut(p->buf, (const uint8_t*)word->text, word->bytes) };
     return OK;
 }
 

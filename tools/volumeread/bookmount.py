@@ -17,7 +17,7 @@ The ground's owners and the findings are bookcensus.py's; this is the mount.
 from . import bookread, dog_ear, ondisk, stitch, stitch_ribbon, tally
 from .bookread import Short
 from .ondisk import BLOCK, RunsNormal
-from .stitch import (BORN, COINED, FROZEN, LABELED, QUITCLAIM, SHAPED, THAWED, UNDONE, USE_CONTEXT,
+from .stitch import (BORN, COINED, FROZEN, LABELED, QUITCLAIM, SHAPED, THAWED, UNDONE, USE_CONTEXT, VOLUME_NAME,
                      DATA_FLUSHED, KIND_NAMES, LABEL_FLAGS, LABEL_HEAD, LABEL_KEEP, LABEL_NAME, LABEL_SHOWN, LABEL_TAGS)
 from .tally import FileState, Run
 
@@ -173,6 +173,7 @@ class BookMount:
         self.refusal, self.glass, self.said = None, [], []
         self.slots, self.slot, self.tally, self.ribbon, self.facsimile = [], None, None, None, []
         self.files, self.locked, self.locked_runs, self.tags, self.use = {}, {}, {}, {}, b""
+        self.name = b""
         self.overlay, self.fallow, self.undone, self.mismatched, self.born = {}, [], {}, set(), set()
         self.errata, self._errata = [], {}
         self.older_nodes, self.older_quires = [], []
@@ -281,7 +282,7 @@ class BookMount:
             self.Say("RECORD_SHAPE", "damage", "the book is written against its own shape — %s" % why)
         self.files = {fid: fs.Copy() for fid, fs in t.content.files.items()}
         self.locked, self.locked_runs = dict(t.locked), dict(t.locked_runs)
-        self.tags, self.use = dict(t.content.tags), t.content.use
+        self.tags, self.use, self.name = dict(t.content.tags), t.content.use, t.content.name
         if self.only is not None and self.only[0] == tally.FILES:
             self.tags = dict(self.known)
         for r in taken:
@@ -572,13 +573,14 @@ class BookMount:
             if u.seq in refused:
                 continue
             try:
-                files, tags, use, fallow, overlay = self._Stitch(u)
+                files, tags, words, fallow, overlay = self._Stitch(u)
             except Refused as e:
                 self.Glass("stitch %u is not applied: %s" % (u.seq, e))
                 self.passed.add(u.seq)
                 continue
-            dog_ear.Stitched(self.dog_ear, self.files, files, self.touched, self.coined, use is not self.use)
-            self.files, self.tags, self.use = files, tags, use
+            dog_ear.Stitched(self.dog_ear, self.files, files, self.touched, self.coined, words[0] is not self.use,
+                             words[1] is not self.name)
+            self.files, self.tags, (self.use, self.name) = files, tags, words
             self.fallow.extend(fallow)
             self.overlay.update(overlay)
             self.applied.append(u.seq)
@@ -593,7 +595,7 @@ class BookMount:
         ribbon_transcribe.c RibbonStitchApplied). Each gathering again passes
         over one fid more, so it ends."""
         while True:
-            files, tags, use, fallow, overlay = dict(self.files), dict(self.tags), self.use, [], {}
+            files, tags, words, fallow, overlay = dict(self.files), dict(self.tags), (self.use, self.name), [], {}
             self.touched, self.coined = set(), []
             passed = len(self.undone.get(u.seq, ()))
             if u.head is not None and u.head.longer:
@@ -601,10 +603,10 @@ class BookMount:
                               "written by a kernel that knows more" % u.head.longer)
             for kind, ign, body, _at in u.records:
                 if self.only is None or self._MayBeOf(kind, ign, body, u.seq):
-                    use = self._Record(u, kind, ign, body, files, tags, fallow, use, overlay)
+                    words = self._Record(u, kind, ign, body, files, tags, fallow, words, overlay)
             self._Fresh(u)
             if len(self.undone.get(u.seq, ())) == passed:
-                return files, tags, use, fallow, overlay
+                return files, tags, words, fallow, overlay
 
     def _MayBeOf(self, kind, ign, body, seq):
         """May a record be of the keys Facsimile replays (`only`) — the
@@ -646,12 +648,12 @@ class BookMount:
         if named != u.parsed.fresh:
             raise Refused("its Clasp names %u fresh block(s) and its records %u (§2.7)" % (u.parsed.fresh, named))
 
-    def _Record(self, u, kind, ign, body, files, tags, fallow, use, overlay):
+    def _Record(self, u, kind, ign, body, files, tags, fallow, words, overlay):
         if kind not in KIND_NAMES or kind in (stitch.STITCH_HEAD, stitch.CLASP):
             if not ign:
                 raise Refused("it carries a record of kind %u this reader does not know and may not step "
                               "over — written by a kernel that knows more" % kind)
-            return use
+            return words
         try:
             d = stitch.RecordDecode(kind, body, u.seq)
         except Short as e:
@@ -660,22 +662,24 @@ class BookMount:
             raise Refused("its %s is %u byte(s) longer than this reader knows — written by a kernel that "
                           "knows more" % (KIND_NAMES[kind], d["longer"]))
         if kind == UNDONE:
-            return use
+            return words
         if kind in (BORN, SHAPED, LABELED, QUITCLAIM) and d["fid"] in self.undone.get(u.seq, ()):
             fallow.extend(r for r in self._Inserted(kind, d) if r not in fallow)
-            return use
+            return words
         if kind in (SHAPED, LABELED, QUITCLAIM) and self._Locked(d["fid"], files):
-            return use                       # a locked file stays as it is locked
+            return words                       # a locked file stays as it is locked
         if kind == USE_CONTEXT:
-            return d["text"]
+            return d["text"], words[1]
+        if kind == VOLUME_NAME:
+            return words[0], d["text"]
         if kind in (FROZEN, THAWED):
             self.Glass("stitch %u carries a %s — a bookmark this kernel cannot hold (§5)"
                        % (u.seq, KIND_NAMES[kind]))
-            return use
+            return words
         if kind == COINED:
             self._Coined(u, d, tags)
             self.coined.append(d["tid"])
-            return use
+            return words
         self.touched.add(d["fid"])
         try:
             self._File(u, kind, d, files, tags, fallow, overlay)
@@ -686,7 +690,7 @@ class BookMount:
             self.Say("BASE_MISMATCH", "damage", "stitch %u's %s of fid %u does not fit the file: %s — the "
                      "file stays as it last matched (§3.9, the rule of rot)" % (u.seq, KIND_NAMES[kind],
                                                                                d["fid"], e))
-        return use
+        return words
 
     @staticmethod
     def _Inserted(kind, d):

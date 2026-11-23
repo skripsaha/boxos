@@ -501,6 +501,12 @@ static error_t RibbonStageLaid(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* 
         rp->use     = st->use;
         rp->use_len = st->use_len;
     }
+    if (st->name_set) {
+        DogEarPut(vol, TALLY_USE, (TallyKey){ 1, 0 }, (TallyKey){ 2, 0 });
+        rp->name_set = true;
+        rp->name     = st->name;
+        rp->name_len = st->name_len;
+    }
     for (uint64_t i = 0; rc == OK && i < st->nfallow; i++) {
         if (!RibbonGrow((void**)&vol->book.fallow, vol->book.nfallow, &vol->book.capfallow, sizeof(Strip)))
             return ERR_NO_MEMORY;
@@ -816,6 +822,8 @@ error_t RibbonTranscribe(TagFSVolume* vol, RibbonWalk* w, const char** what)
             rc = RibbonStitchApplied(vol, rp, w->stitch[s]);
     if (rc == OK && rp->use_set)
         rc = BookUseRecalled(vol, rp->use, rp->use_len);
+    if (rc == OK && rp->name_set)
+        rc = VolumeNameRecall(vol, rp->name, rp->name_len);
     if (rc == OK)
         rc = RibbonSettled(vol, rp);
     if (rc == OK)

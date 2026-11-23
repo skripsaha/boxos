@@ -1,9 +1,10 @@
 /*
- * Storage Deck — the volumes of the house: storage.volume.list and
- * storage.volume.info (boxos_decks.h, where both layouts are said once).
- * What a person sees of where a file lies: every volume, its number — the one
- * a file's id carries —, whether it is the home volume, mounted, taking no
- * change or away, how big it is and how full, and what it is on.
+ * Storage Deck — the volumes of the house: storage.volume.list,
+ * storage.volume.info and storage.volume.name (boxos_decks.h, where the
+ * layouts are said once). What a person sees of where a file lies: every
+ * volume, its number — the one a file's id carries —, the name the person
+ * gave it, whether it is the home volume, mounted, taking no change or away,
+ * how big it is and how full, and what it is on.
  */
 
 #include "klib.h"
@@ -14,13 +15,33 @@
 #include "storage_deck.h"
 #include "storage_tags.h"
 #include "tagfs.h"
+#include "volume_name.h"
+#include "volume_tally.h"
+#include "settle_ops.h"
+
+_Static_assert(STORAGE_VOLUME_NAME_MOST == TALLY_VOLUME_NAME_MOST, "a volume's name, as the deck and the book bound it");
+
+/* What a record says of one volume: the house's facts and the name. */
+typedef struct {
+    TagFSVolumeFacts f;
+    uint16_t         name_len;
+    char             name[TALLY_VOLUME_NAME_MOST];
+} VolumeSaid;
+
+static void VolumeSaidOf(TagFSVolume *vol, VolumeSaid *v)
+{
+    TagFSVolumeFactsOf(vol, &v->f);
+    size_t n    = VolumeNameOf(vol, v->name, sizeof(v->name));
+    v->name_len = (uint16_t)(n < sizeof(v->name) ? n : sizeof(v->name));
+}
 
 /* One volume's record ([u32 number][u32 flags][u8 uuid[16]][u64 bytes]
  * [u64 free][u64 files][u16 name_len][u16 medium_len][name][medium]) laid at
  * kp + pos, or only measured with kp NULL: the position past it. */
-static uint64_t VolumeRecord(uint8_t *kp, uint64_t pos, const TagFSVolumeFacts *f)
+static uint64_t VolumeRecord(uint8_t *kp, uint64_t pos, const VolumeSaid *v)
 {
-    uint16_t name_len   = 0;
+    const TagFSVolumeFacts *f = &v->f;
+    uint16_t name_len   = v->name_len;
     uint16_t medium_len = (uint16_t)strnlen(f->medium, sizeof(f->medium));
     if (kp) {
         uint32_t flags = (f->home ? STORAGE_VOLUME_HOME : 0u) | (f->mounted ? STORAGE_VOLUME_MOUNTED : 0u) |
@@ -34,6 +55,7 @@ static uint64_t VolumeRecord(uint8_t *kp, uint64_t pos, const TagFSVolumeFacts *
         memcpy(kp + pos + 40, &f->files, 8);
         memcpy(kp + pos + 48, &name_len, 2);
         memcpy(kp + pos + 50, &medium_len, 2);
+        memcpy(kp + pos + STORAGE_VOLUME_LISTED_HEAD, v->name, name_len);
         memcpy(kp + pos + STORAGE_VOLUME_LISTED_HEAD + name_len, f->medium, medium_len);
     }
     return pos + STORAGE_VOLUME_LISTED_HEAD + name_len + medium_len;
@@ -53,9 +75,9 @@ int ObjVolumeList(const ManifestOp *op, Crate *crates, uint16_t crate_count, con
     uint64_t need  = 8;
     bool     full  = false;
     for (TagFSVolume *vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol)) {
-        TagFSVolumeFacts f;
-        TagFSVolumeFactsOf(vol, &f);
-        uint64_t past = VolumeRecord(NULL, need, &f);
+        VolumeSaid v;
+        VolumeSaidOf(vol, &v);
+        uint64_t past = VolumeRecord(NULL, need, &v);
         full = full || past > out->capacity;
         if (!full)
             need = past;
@@ -67,11 +89,11 @@ int ObjVolumeList(const ManifestOp *op, Crate *crates, uint16_t crate_count, con
     uint32_t delivered = 0;
     uint64_t pos       = 8;
     for (TagFSVolume *vol = TagFSVolumeNext(NULL); vol && delivered < total; vol = TagFSVolumeNext(vol)) {
-        TagFSVolumeFacts f;
-        TagFSVolumeFactsOf(vol, &f);
-        if (VolumeRecord(NULL, pos, &f) > need)
-            break;               /* a volume taken in, or grown, since the room was measured: the next call sees it */
-        pos = VolumeRecord(kp, pos, &f);
+        VolumeSaid v;
+        VolumeSaidOf(vol, &v);
+        if (VolumeRecord(NULL, pos, &v) > need)
+            break;               /* a volume taken in, renamed or grown since the room was measured: the next call sees it */
+        pos = VolumeRecord(kp, pos, &v);
         delivered++;
     }
     memcpy(kp, &delivered, 4);
@@ -91,17 +113,30 @@ int ObjVolumeInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count, con
     TagFSVolume *vol = TagFSVolumeNumbered(param_u32(op, 0));
     if (!vol) return ERR_OBJECT_NOT_FOUND;
 
-    TagFSVolumeFacts f;
-    TagFSVolumeFactsOf(vol, &f);
+    VolumeSaid v;
+    VolumeSaidOf(vol, &v);
     Crate   *out  = &crates[op->out_crate];
-    uint64_t need = VolumeRecord(NULL, 0, &f);
+    uint64_t need = VolumeRecord(NULL, 0, &v);
     if (need > out->capacity) return ERR_BUFFER_TOO_SMALL;
     uint8_t *kp = crate_out_alloc(out, need);
     if (!kp) return ERR_INVALID_ADDRESS;
-    (void)VolumeRecord(kp, 0, &f);
+    (void)VolumeRecord(kp, 0, &v);
     int crc = crate_out_commit(out, ctx, kp, need);
     crate_buf_free(kp);
     if (crc != OK) return crc;
     out->size = need;
     return OK;
+}
+
+/* STORAGE_VOLUME_NAME  params: [u32 number][u16 len][name]. */
+int ObjVolumeName(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->param_size < 6) return ERR_INVALID_ARGUMENT;
+    uint16_t len = param_u16(op, 4);
+    if (op->param_size < 6u + (uint32_t)len) return ERR_INVALID_ARGUMENT;
+    if (!StoragePersonSays(ctx, true)) return ERR_ACCESS_DENIED;
+    TagFSVolume *vol = TagFSVolumeNumbered(param_u32(op, 0));
+    if (!vol) return ERR_OBJECT_NOT_FOUND;
+    return SettleVolumeNamed(vol, (const char *)op->params + 6, len, ctx, crates);
 }

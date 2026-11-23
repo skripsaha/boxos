@@ -175,6 +175,20 @@ typedef struct {
 } VolumeListed;
 int volume_list(VolumeListed **out, size_t *count);
 int volume_info(uint32_t number, VolumeListed **out);
+/* The volume as a person calls it, into `out` (`room` bytes, NUL-ended): the
+ * name they gave it, or — with none — what it is on and how big it is
+ * ("QEMU HARDDISK, 64 MB"). size_shown: `bytes` said the way a medium's maker
+ * counts them, in thousands ("32 GB"). The bytes written. */
+size_t volume_shown(const VolumeListed *v, char *out, size_t room);
+size_t size_shown(uint64_t bytes, char *out, size_t room);
+/* The name a person gives the volume numbered `number` — UTF-8 of any
+ * language, at most STORAGE_VOLUME_NAME_MOST bytes, no control character;
+ * NULL or "" takes it away. Kept in the volume's book, it goes with the
+ * volume; with none, the volume is shown by its medium. Asked by the person's
+ * hands (change-tags in the box), answered once the volume holds it: 0, or a
+ * negative -error_t — -ERR_TAGFS_NO_SPACE for a name the volume had no room
+ * for, the old one kept. */
+int volume_rename(uint32_t number, const char *name);
 static inline uint32_t volume_of(file_id_t file)
 {
     return (uint32_t)((file >> STORAGE_VOLUME_FILE_SHIFT) & 0x7FFFu);

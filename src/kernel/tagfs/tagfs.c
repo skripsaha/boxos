@@ -8,6 +8,7 @@
 #include "file_map/file_map.h"
 #include "use_context.h"
 #include "use_memory/use_memory.h"
+#include "volume/volume_name.h"
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
@@ -1802,6 +1803,12 @@ error_t tagfs_init(TagFSVolume* vol) {
      */
     kprintf("[TagFS] the volume on seat %u is MOUNTED — %llu file(s)\n",
             vol->mount.seat, (unsigned long long)vol->state.total_files);
+    char   name[TALLY_VOLUME_NAME_MOST + 1u];
+    size_t named = VolumeNameOf(vol, name, TALLY_VOLUME_NAME_MOST);
+    if (named) {
+        name[named] = '\0';
+        kprintf("[TagFS] volume %u of the house is called \"%s\"\n", vol->number, name);
+    }
 
     /*
      * ‼ WHAT THIS MOUNT KEEPS ON THE KERNEL HEAP, AND FOR HOW MANY NAMES.
@@ -1870,6 +1877,7 @@ static void tagfs_clear_the_ground(TagFSVolume* vol)
     /* What this volume remembered goes with it — the Use Context's memory of
      * it too; the next one is read, not assumed. */
     UseMemoryLetGo(vol);
+    VolumeNameLetGo(vol);
 
     if (vol->state.registry) {
         tag_registry_destroy(vol->state.registry);

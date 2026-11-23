@@ -26,7 +26,7 @@
  *     moves grow an inner node; the ribbon's Quire and its next_quire the two
  *     grains past B — refused aloud when they run past the data run.
  * Every node of a Tally is written in both copies (§2.5), and an empty tree
- * is not written at all: an empty Use Context has no USE (§1.4).
+ * is not written at all: a volume given no name has no USE (§1.4).
  */
 
 #include "create_tagfs_bind.h"

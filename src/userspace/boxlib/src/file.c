@@ -12,6 +12,7 @@
 #include "box/core/notify.h"
 #include "box/core/result.h"
 #include "box/string.h"
+#include "box/print.h"      /* snprintf — a volume as a person calls it */
 #include "box/types.h"
 #include "box/error.h"
 #include "box/memory.h"     /* malloc / free — a crate sized to the ask */
@@ -143,8 +144,8 @@ static int volumes_laid(const uint8_t *records, size_t bytes, uint32_t count, Vo
     return 0;
 }
 
-/* A record: its fixed part, a name and a medium of 255 bytes at the most. */
-#define VOLUME_RECORD_MOST (STORAGE_VOLUME_LISTED_HEAD + 2u * 255u)
+/* A record: its fixed part, a name of STORAGE_VOLUME_NAME_MOST bytes and a medium of 255 at the most. */
+#define VOLUME_RECORD_MOST (STORAGE_VOLUME_LISTED_HEAD + STORAGE_VOLUME_NAME_MOST + 255u)
 
 int volume_list(VolumeListed **out, size_t *count)
 {
@@ -199,6 +200,48 @@ int volume_info(uint32_t number, VolumeListed **out)
                      BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     return volumes_laid(page, sizeof(page), 1, out);
+}
+
+size_t size_shown(uint64_t bytes, char *out, size_t room)
+{
+    static const char *const units[] = { "bytes", "KB", "MB", "GB", "TB", "PB" };
+    if (!out || !room) return 0;
+    size_t unit = 0;
+    while (bytes >= 1000u && unit + 1 < sizeof(units) / sizeof(units[0])) {
+        bytes = (bytes + 500u) / 1000u;
+        unit++;
+    }
+    int n = snprintf(out, room, "%llu %s", (unsigned long long)bytes, units[unit]);
+    if (n < 0) { out[0] = '\0'; return 0; }
+    return (size_t)n < room ? (size_t)n : room - 1u;
+}
+
+size_t volume_shown(const VolumeListed *v, char *out, size_t room)
+{
+    if (!out || !room) return 0;
+    char size[24];
+    size_shown(v->Bytes, size, sizeof(size));
+    const char *medium = v->Medium && v->Medium[0] ? v->Medium : "a medium";
+    int n = v->Name && v->Name[0] ? snprintf(out, room, "%s", v->Name)
+          : v->Bytes              ? snprintf(out, room, "%s, %s", medium, size)
+                                  : snprintf(out, room, "%s", medium);
+    if (n < 0) { out[0] = '\0'; return 0; }
+    return (size_t)n < room ? (size_t)n : room - 1u;
+}
+
+int volume_rename(uint32_t number, const char *name)
+{
+    size_t len = name ? strlen(name) : 0;
+    if (len > STORAGE_VOLUME_NAME_MOST) return -ERR_INVALID_ARGUMENT;
+    /* params: [u32 number][u16 len][name]. */
+    uint8_t  params[6 + STORAGE_VOLUME_NAME_MOST];
+    uint16_t n = (uint16_t)len;
+    memcpy(params, &number, 4);
+    memcpy(params + 4, &n, 2);
+    if (len) memcpy(params + 6, name, len);
+    int rc = MfCall1(DECK_STORAGE, STORAGE_VOLUME_NAME, params, (uint16_t)(6 + len), NULL, 0, NULL, 0, NULL,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
 }
 
 /* The kernel answers [u32 delivered][u32 total][u64 ids[delivered]]: how many

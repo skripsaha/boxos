@@ -108,6 +108,8 @@ void BinderSliceLetGo(BinderWork* w)
     w->ndranges = 0;
     UseTextDrop(w->use);
     w->use = NULL;
+    UseTextDrop(w->name);
+    w->name = NULL;
 }
 
 /* Runs of ground sifted down a heap of `n` by first block. */

@@ -646,7 +646,8 @@ class BookCensus:
         out = {"slots": slots, "slot": m.slot.index if m.slot else None, "refusal": m.refusal,
                "under_glass": list(m.glass), "counts": dict(m.counts), "tally": None,
                "ribbon": {"stitches": [], "torn": [], "past": [], "quires": [], "lied": False},
-               "locked": {str(f): w for f, w in sorted(m.locked.items())}, "use": m.use.decode("latin-1")}
+               "locked": {str(f): w for f, w in sorted(m.locked.items())}, "use": m.use.decode("latin-1"),
+               "name": m.name.decode("utf-8", "replace")}
         if m.tally is not None:
             t = m.tally
             out["tally"] = {"seq": t.seq, "trees": {tally.TREE_NAMES.get(k, str(k)): {

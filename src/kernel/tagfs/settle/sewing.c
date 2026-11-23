@@ -121,7 +121,7 @@ bool StitchMarksVerdict(TagFSVolume* vol)
  */
 static void StitchCloseForRoom(TagFSVolume* vol, StitchSnap* s, bool awaits)
 {
-    if (awaits && s->claimed == 0 && s->jots.count == 0 && !s->use_owed && s->coined_lo == s->coined_hi &&
+    if (awaits && s->claimed == 0 && s->jots.count == 0 && !s->use_owed && !s->name_owed && s->coined_lo == s->coined_hi &&
         !s->retires && RibbonCloseEarly(vol))
         RibbonNextGiven(vol);
 }
@@ -137,6 +137,8 @@ static uint64_t StitchFlight(TagFSVolume* vol, const StitchSnap* s, uint32_t coi
                      (uint64_t)coined * STITCH_COINED_MOST + text;
     if (s->use_owed)
         bytes += STITCH_USE_MOST + (s->use ? s->use->bytes : 0u);
+    if (s->name_owed)
+        bytes += STITCH_USE_MOST + (s->name ? s->name->bytes : 0u);
     return RibbonStitchOf(vol, bytes);
 }
 
@@ -158,6 +160,7 @@ static void StitchTake(TagFSVolume* vol, StitchSnap* s)
     s->flags     = (s->why == SETTLE_FOR_HALT && HelmOwed(vol) == 0 ? STITCH_CLEAN : 0u) |
                    (RibbonCursorLied(vol) ? STITCH_MEDIUM_LIED : 0u);
     s->use_owed  = UseMemoryStitchTake(vol, &s->use, &s->use_ticket);
+    s->name_owed = VolumeNameStitchTake(vol, &s->name, &s->name_ticket);
     s->claimed   = RibbonClaimTaken(vol);
     bool awaits  = room && FallowAwaitsQuire(vol);
     DocketTakeLocked(vol, &s->jots);
@@ -227,6 +230,8 @@ static error_t StitchMarked(TagFSVolume* vol, StitchSnap* s)
 typedef struct {
     UseText* use;          /* the word written, when it differs from what the book holds; NULL: none */
     bool     use_written;
+    UseText* name;         /* the volume's name written, when it differs from the book's; NULL: none */
+    bool     name_written;
     uint32_t coined;       /* the Coineds of them */
     uint32_t jot_tags;     /* the most tags one file's two records wear */
     uint64_t records;
@@ -303,6 +308,18 @@ static error_t StitchMeasure(TagFSVolume* vol, StitchSnap* s, StitchLoad* l)
         l->records++;
         l->bytes  += STITCH_RECORD_HEAD_MOST + body;
         l->body    = body > l->body ? body : l->body;
+    }
+    if (s->name_owed) {
+        UseText* held   = VolumeNameHeld(vol);
+        l->name_written = !UseTextSame(held, s->name);
+        UseTextDrop(held);
+    }
+    if (l->name_written) {
+        uint64_t body = STITCH_USE_MOST - STITCH_RECORD_HEAD_MOST + (s->name ? s->name->bytes : 0u);
+        l->name     = s->name;
+        l->records++;
+        l->bytes   += STITCH_RECORD_HEAD_MOST + body;
+        l->body     = body > l->body ? body : l->body;
     }
     uint64_t records = 0, bytes = 0, body = 0;
     error_t  rc      = DocketMeasure(&s->jots, &records, &bytes, &body, &l->jot_tags, &l->runs, &l->fresh);
@@ -409,6 +426,12 @@ static error_t StitchStream(TagFSVolume* vol, StitchSnap* s, const StitchLoad* l
                               TallyUsePut(body, l->use ? (const uint8_t*)l->use->text : NULL,
                                           l->use ? l->use->bytes : 0u));
     }
+    if (l->name_written) {
+        starts[n++] = at;
+        at += RibbonRecordPut(out + at, RIBBON_VOLUME_NAME, 1, body,
+                              TallyUsePut(body, l->name ? (const uint8_t*)l->name->text : NULL,
+                                          l->name ? l->name->bytes : 0u));
+    }
     s->fresh   = 0;
     error_t rc = DocketLay(vol, &s->jots, s->seq, l->jot_tags, out, &at, body, starts, &n, &s->fresh);
     if (rc != OK)
@@ -479,7 +502,7 @@ static error_t StitchLay(TagFSVolume* vol, StitchSnap* s, bool* word)
     StitchLoad l;
     StitchSectorsLetGo(s);
     error_t   measured = StitchMeasure(vol, s, &l);
-    *word = l.use_written;
+    *word = l.use_written || l.name_written;
     s->toll = StitchToll(s, l.runs, l.fresh);
     /* Judged again by each attempt with its toll, and kept in s->flags, so the
      * word its StitchHead carries (StitchStream) is the one handed on as it
@@ -500,7 +523,9 @@ static error_t StitchLay(TagFSVolume* vol, StitchSnap* s, bool* word)
         s->useful = len;
         s->of     = (uint32_t)RibbonStitchOf(vol, len);
         StitchHeldToFlight(s);
-        rc    = RibbonRoom(vol, s->of, !l.use_written || !l.use || !l.use->bytes, &s->at, &s->hop);
+        rc    = RibbonRoom(vol, s->of,
+                           (!l.use_written || !l.use || !l.use->bytes) && (!l.name_written || !l.name || !l.name->bytes),
+                           &s->at, &s->hop);
     }
     if (rc == OK && !(s->laid = RibbonTryMake(s->of)))
         rc = ERR_NO_MEMORY;
@@ -541,6 +566,19 @@ static error_t StitchBuild(TagFSVolume* vol, StitchSnap* s)
     error_t rc   = StitchLay(vol, s, &word);
     if (rc != ERR_TAGFS_NO_SPACE || !word)
         return rc;
+    /* A name given the volume — or taken from it — goes first: the stitch
+     * laid without it, the name refused and the book's kept
+     * (volume/volume_name.c). */
+    if (s->name_owed) {
+        kprintf("[TagFS] the name given the volume, %llu byte(s), finds no room on the ribbon: the stitch is laid "
+                "without it, and the volume keeps the name it had (ERR_TAGFS_NO_SPACE to the one who gave it)\n",
+                (unsigned long long)(s->name ? s->name->bytes : 0u));
+        s->name_owed = false;
+        s->name_out  = true;
+        rc = StitchLay(vol, s, &word);
+        if (rc != ERR_TAGFS_NO_SPACE || !word)
+            return rc;
+    }
     uint64_t bytes = s->use ? s->use->bytes : 0u;
     if (s->use_owed && bytes) {
         kprintf("[TagFS] the word the person said, %llu byte(s), finds no room on the ribbon: the stitch is laid "
@@ -688,6 +726,7 @@ void StitchRunBegin(TagFSVolume* vol, SettleWhy why)
 {
     StitchSectorsLetGo(&vol->sewing.stitch);
     UseTextDrop(vol->sewing.stitch.use);
+    UseTextDrop(vol->sewing.stitch.name);
     memset(&vol->sewing.stitch, 0, sizeof(vol->sewing.stitch));
     vol->sewing.stitch.why  = why;
     vol->sewing.stitch.step = STITCH_STEP_TAKE;
@@ -821,6 +860,8 @@ static void StitchDogEared(TagFSVolume* vol, const StitchSnap* s)
         DogEarPut(vol, TALLY_TAGS, (TallyKey){ s->coined_lo, 0 }, (TallyKey){ s->coined_hi, 0 });
     if (s->use_owed || s->use_forgot)
         DogEarPut(vol, TALLY_USE, (TallyKey){ 0, 0 }, (TallyKey){ 1, 0 });
+    if (s->name_owed)
+        DogEarPut(vol, TALLY_USE, (TallyKey){ 1, 0 }, (TallyKey){ 2, 0 });
 }
 
 /* DONE: the ribbon's cursor past the stitch — the room it leaves published
@@ -839,6 +880,7 @@ void StitchRunEnd(TagFSVolume* vol, error_t rc)
     StitchSnap* s     = &vol->sewing.stitch;
     TagFSState* fs    = &vol->state;
     UseText*    gone  = NULL;
+    UseText*    named = NULL;
     Jot*        spent = NULL;
     FallowNode* nodes = NULL;
     if (rc != OK) {
@@ -861,6 +903,12 @@ void StitchRunEnd(TagFSVolume* vol, error_t rc)
             s->use = NULL;
         } else if (s->use_out) {
             gone = UseMemoryStitchRefused(vol, s->use_ticket, s->use_forgot);
+        }
+        if (s->name_owed) {
+            named   = VolumeNameStitchSettled(vol, s->name, s->name_ticket);
+            s->name = NULL;
+        } else if (s->name_out) {
+            VolumeNameStitchRefused(vol, s->name_ticket);
         }
         FallowStitchSettled(vol, s->target, s->seq, s->cycle);
         FallowQuireLeft(vol, left);
@@ -895,5 +943,8 @@ void StitchRunEnd(TagFSVolume* vol, error_t rc)
     UseTextDrop(gone);
     UseTextDrop(s->use);
     s->use = NULL;
+    UseTextDrop(named);
+    UseTextDrop(s->name);
+    s->name = NULL;
     StitchSectorsLetGo(s);
 }

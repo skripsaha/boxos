@@ -59,6 +59,17 @@
 #include "../show/show.h"
 #include "../use_memory/use_memory.h"
 
+/* The name a person gave the volume (volume/volume_name.c), under the state
+ * lock: the one its book holds, the one asked and owed to the next stitch,
+ * the asking's number and the last one a stitch refused for want of room. */
+typedef struct {
+    UseText* name;
+    UseText* said;
+    uint64_t ticket;
+    uint64_t refused;
+    bool     owed;
+} VolumeNameState;
+
 /* The volume's door, its mounting and its medium (tagfs.c): who is inside and
  * which mounting it is, a mount owed and what asks it again, and the seat, the
  * taking of it and the ground the volume stands on. */
@@ -290,6 +301,7 @@ struct TagFSVolume {
     BookMount             book;             /* its book as the mount read it (mount/book_mount.h) */
     BinderBook            binder;           /* the slots and what the next Tally is written into (settle/binder.h) */
     UseMemoryState        use_memory;       /* its memory of the Use Context (use_memory/use_memory.h) */
+    VolumeNameState       volume_name;      /* the name a person gave it (above) */
 
     /* the mount's parts (mount/) */
     BookMountState        book_mount;
@@ -362,6 +374,16 @@ void TagFSVolumeBegin(TagFSVolume* vol);
  * the first time this boot, begun and numbered after the last — NULL when the
  * machine has no memory for it, or the house no number. */
 TagFSVolume* TagFSVolumeTakeIn(const uint8_t uuid[16]);
+
+/* The name, as the cycle and the mount see it (volume/volume_name.c): held,
+ * taken into a stitch, settled or refused there — under the state lock —, and
+ * read back from the book, and let go of with the volume. */
+UseText* VolumeNameHeld(TagFSVolume* vol);
+bool     VolumeNameStitchTake(TagFSVolume* vol, UseText** said, uint64_t* ticket);
+UseText* VolumeNameStitchSettled(TagFSVolume* vol, UseText* said, uint64_t ticket);
+void     VolumeNameStitchRefused(TagFSVolume* vol, uint64_t ticket);
+error_t  VolumeNameRecall(TagFSVolume* vol, const uint8_t* text, uint64_t len);
+void     VolumeNameLetGo(TagFSVolume* vol);
 
 /* What the house asks of each volume (tagfs.c): its service pass, an arrival
  * attended, the memory a refused mount waited for come back. */

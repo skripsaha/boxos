@@ -446,7 +446,8 @@ typedef struct {
     uint32_t     kept_parcel;    /* ... its next Parcel, and whether its header was handed */
     bool         kept_head;
     uint32_t     tag;            /* TAGS: the next id looked for */
-    bool         use;            /* USE: handed */
+    bool         use;            /* USE: the Use Context handed */
+    bool         name;           /* USE: the volume's name handed */
     BinderDigestAt digest;       /* DIGESTS: the walk over the ground — and a STRICT kernel's laid in, ... */
     BinderDigestAt tip_at;       /* ... its walk over the ground the Tally laid in speaks for, the range it */
     uint64_t     tip_range;      /* ... lays and offers the next element is looked for in, and its body */
@@ -616,6 +617,7 @@ typedef struct {
     uint32_t      tag_hi;        /* the tags below it are the book's */
     uint64_t      tag_gen;       /* ... as of this Ink, the settled stitch's: a tag retired by it is laid RETIRED */
     UseText*      use;
+    UseText*      name;          /* the volume's name as the slice took it (volume/volume_name.c) */
     BinderGround* ground;        /* by first block: what DIGESTS names — laid in, in the leaves it lays and */
     uint64_t      nground;       /* ... offers; a STRICT kernel's every block of the state, and ... */
     BinderGround* tground;       /* ... the ground laid in apart, held to it in the ranges it lays and offers */

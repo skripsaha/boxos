@@ -8049,12 +8049,12 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 50 (healthy says how) and
-# the 362 of the stand's own fifty suites: stand 25, stand_lock 1,
+# the 364 of the stand's own fifty suites: stand 25, stand_lock 1,
 # stand_spelling 6, stand_roadstead 4, stand_plot 3, stand_index 6,
 # stand_helm 6, stand_port 1, stand_use 2, stand_settle 9, stand_read 6,
 # stand_run 4, stand_medium 13, stand_warrant 7, stand_room 1, frame 2,
 # width 4, parcel 13, tract 1, record_splices 4, stand_tally 15,
-# stand_ribbon 8, stand_stitch 14, stand_stitch_edge 12, stand_docket 14,
+# stand_ribbon 8, stand_stitch 16, stand_stitch_edge 12, stand_docket 14,
 # stand_fresh 7, stand_fresh_ground 5, stand_fresh_change 5, stand_binder 14,
 # stand_endpaper 6, stand_book_room 13, stand_errata 8, stand_keep 5,
 # stand_name 5, stand_retire 7, stand_show 14, stand_head 7, stand_toll 4,
@@ -8065,7 +8065,7 @@ STAND_HELD="
 # a test that stopped covering anything, and the count is where that shows.
 # How many of them pass and how many stand down is the road's — said, not
 # pinned.
-STAND_RUN=412
+STAND_RUN=414
 
 # What a VOLUME_TESTS kernel says of a record that names a run of no blocks
 # (file_record.c, FileRecordBuild), and of a Tract about to stand taller than

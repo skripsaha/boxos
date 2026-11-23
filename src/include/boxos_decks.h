@@ -547,6 +547,18 @@
  * one record as volume.list's. ERR_OBJECT_NOT_FOUND for a number the house
  * gave no volume. */
 #define STORAGE_VOLUME_INFO         0x2C
+/* volume.name — the name a person gives a volume, by the person's hands
+ * (change-tags; ERR_ACCESS_DENIED otherwise): params = [u32 number][u16 len]
+ * [name], `len` bytes of UTF-8 of any language, at most STORAGE_VOLUME_NAME_
+ * MOST, no control character — 0 takes the name away. Kept in the volume's
+ * book, the name goes with the volume to every machine it is met on. The
+ * answer comes once the volume holds it: OK; ERR_INVALID_ARGUMENT for one not
+ * spelled as a name; ERR_OBJECT_NOT_FOUND for a number the house gave no
+ * volume; ERR_DEVICE_NOT_READY for a volume whose medium left;
+ * ERR_TAGFS_READ_ONLY for one that takes no change; ERR_TAGFS_NO_SPACE for a
+ * name its book had no room for, the old name kept. */
+#define STORAGE_VOLUME_NAME         0x2D
+#define STORAGE_VOLUME_NAME_MOST    255u    /* volume_tally.h TALLY_VOLUME_NAME_MOST */
 #define STORAGE_VOLUME_LISTED_HEAD  52u     /* a record before its name */
 #define STORAGE_VOLUME_HOME         0x01u   /* flags: the volume the machine was booted from */
 #define STORAGE_VOLUME_MOUNTED      0x02u   /* its book is read and its files are found */

@@ -41,7 +41,7 @@ typedef struct {
 static const char *KindName(uint64_t kind)
 {
     static const char *const names[] = { "", "StitchHead", "Clasp", "Undone", "Born", "Shaped", "Labeled",
-                                         "Quitclaim", "Coined", "UseContext", "Frozen", "Thawed" };
+                                         "Quitclaim", "Coined", "UseContext", "Frozen", "Thawed", "VolumeName" };
     return kind <= RIBBON_KINDS_KNOWN ? names[kind] : "";
 }
 

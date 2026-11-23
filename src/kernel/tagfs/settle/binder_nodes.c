@@ -401,6 +401,7 @@ static void TreeBegin(BinderWork* w, uint32_t tree)
     p->block  = 0;
     p->tag    = 0;
     p->use    = false;
+    p->name   = false;
     p->digest    = (BinderDigestAt){ 0, 0, w->tree_kept };
     p->tip_at    = (BinderDigestAt){ 0, 0, w->tree_kept };
     p->tip_range = 0;

@@ -20,11 +20,11 @@ from . import bookread, ondisk, tally
 from .tally import Run, RunsGet, RunsPut, TagDecode, TagEncode, TagState, TAG_HAS_VALUE, TAG_OWNED, TAG_RETIRED
 
 # The kinds of a stitch's records (§2.7, §2.8)
-STITCH_HEAD, CLASP, UNDONE, BORN, SHAPED, LABELED, QUITCLAIM, COINED, USE_CONTEXT, FROZEN, THAWED = \
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+STITCH_HEAD, CLASP, UNDONE, BORN, SHAPED, LABELED, QUITCLAIM, COINED, USE_CONTEXT, FROZEN, THAWED, VOLUME_NAME = \
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
 KIND_NAMES = {STITCH_HEAD: "StitchHead", CLASP: "Clasp", UNDONE: "Undone", BORN: "Born", SHAPED: "Shaped",
               LABELED: "Labeled", QUITCLAIM: "Quitclaim", COINED: "Coined", USE_CONTEXT: "UseContext",
-              FROZEN: "Frozen", THAWED: "Thawed"}
+              FROZEN: "Frozen", THAWED: "Thawed", VOLUME_NAME: "VolumeName"}
 
 # StitchHead.flags (§2.7)
 DATA_FLUSHED, CLEAN, MEDIUM_LIED = 1, 2, 4
@@ -154,6 +154,10 @@ def UseContext(text):
     return Record(USE_CONTEXT, VarintPut(len(text)) + text)
 
 
+def VolumeName(text):
+    return Record(VOLUME_NAME, VarintPut(len(text)) + text, ignorable=True)
+
+
 def Undone(seq_back, why, fids):
     return Record(UNDONE, VarintPut(seq_back) + VarintPut(why) + IdsPut(sorted(fids)))
 
@@ -279,7 +283,7 @@ def RecordDecode(kind, body, seq):
     elif kind == COINED:
         d["tid"] = c.V()
         d["tag"] = TagDecode(c, "", [])
-    elif kind == USE_CONTEXT:
+    elif kind in (USE_CONTEXT, VOLUME_NAME):
         d["text"] = c.Take(c.V())
     elif kind == UNDONE:
         d.update(seq_back=c.V(), why=c.V(), fids=c.Ids())
@@ -310,6 +314,8 @@ def RecordAgain(kind, d):
         return Coined(d["tid"], t.key, t.value, bool(t.flags & TAG_RETIRED), t.owner)
     if kind == USE_CONTEXT:
         return UseContext(d["text"])
+    if kind == VOLUME_NAME:
+        return VolumeName(d["text"])
     if kind == UNDONE:
         return Undone(d["seq_back"], d["why"], d["fids"])
     if kind == FROZEN:
@@ -650,6 +656,7 @@ def GoldenStitch():
                UseContext(b"work,play"),
                Frozen(1, 1, [2, 3], b"snap"),
                Thawed(1),
+               VolumeName(b"photos"),
                Unknown(31, 1, b"\x07")]
     stream, starts, _clasp = StitchStream(head, records)
     vlbas = list(range(0x4000, 0x4000 + SECTORS_PER_BLOCK))
@@ -662,7 +669,7 @@ RIBBON_NUMBERS = (
     ("RIBBON_STITCH_HEAD", STITCH_HEAD), ("RIBBON_CLASP", CLASP), ("RIBBON_UNDONE", UNDONE), ("RIBBON_BORN", BORN),
     ("RIBBON_SHAPED", SHAPED), ("RIBBON_LABELED", LABELED), ("RIBBON_QUITCLAIM", QUITCLAIM),
     ("RIBBON_COINED", COINED), ("RIBBON_USE_CONTEXT", USE_CONTEXT), ("RIBBON_FROZEN", FROZEN),
-    ("RIBBON_THAWED", THAWED), ("RIBBON_KINDS_KNOWN", max(KIND_NAMES)), ("STITCH_DATA_FLUSHED", DATA_FLUSHED),
+    ("RIBBON_THAWED", THAWED), ("RIBBON_VOLUME_NAME", VOLUME_NAME), ("RIBBON_KINDS_KNOWN", max(KIND_NAMES)), ("STITCH_DATA_FLUSHED", DATA_FLUSHED),
     ("STITCH_CLEAN", CLEAN), ("STITCH_MEDIUM_LIED", MEDIUM_LIED), ("LABEL_NAME", LABEL_NAME),
     ("LABEL_FLAGS", LABEL_FLAGS), ("LABEL_TAGS", LABEL_TAGS), ("LABEL_KEEP", LABEL_KEEP),
     ("LABEL_SHOWN", LABEL_SHOWN), ("LABEL_HEAD", LABEL_HEAD), ("LABEL_PASSPORT", LABEL_PASSPORT), ("RUN_EXT_CODEC", tally.EXT_CODEC),

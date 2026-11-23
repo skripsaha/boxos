@@ -362,6 +362,9 @@ typedef struct {
     bool              use_set;
     const uint8_t*    use;
     uint64_t          use_len;
+    bool              name_set;   /* a VolumeName: the volume's name anew, `name_len` bytes (0: none) */
+    const uint8_t*    name;
+    uint64_t          name_len;
     bool              rot;        /* a record of it did not fit its file (the rule of rot): gathered again */
     char              refused[200];   /* why the stitch is not applied; "" while it is */
 } RibbonStage;
@@ -384,6 +387,9 @@ typedef struct {
     bool            use_set;
     const uint8_t*  use;
     uint64_t        use_len;
+    bool            name_set;     /* the last VolumeName replayed */
+    const uint8_t*  name;
+    uint64_t        name_len;
     uint64_t        only;         /* Facsimile's: the tree whose keys [only_lo, only_hi) alone are
                                    * replayed (RibbonFacsimile); 0 for every record */
     uint64_t        only_lo, only_hi;

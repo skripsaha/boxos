@@ -12,6 +12,31 @@ BOX_FORM("takes optional words \"the tags or names to look for\"\n"
  * pushes its tags along. */
 #define FILES_NAME_COLUMN 32u
 
+/* Whether file `a` is listed before file `b`: by the volume it lies on, the
+ * home volume first, then by name. */
+static bool files_before(file_id_t a, const char *a_name, file_id_t b, const char *b_name)
+{
+    if (volume_of(a) != volume_of(b))
+        return volume_of(a) < volume_of(b);
+    return a_name && b_name && strcmp(a_name, b_name) < 0;
+}
+
+/* The heading of the files of volume `number`: the volume as a person calls
+ * it (volume_shown), the home one said to be. */
+static void files_heading(const VolumeListed *volumes, size_t count, uint32_t number)
+{
+    char shown[STORAGE_VOLUME_NAME_MOST + 64];
+    const VolumeListed *v = NULL;
+    for (size_t i = 0; i < count && !v; i++)
+        if (volumes[i].Number == number)
+            v = &volumes[i];
+    if (!v)
+        snprintf(shown, sizeof(shown), "volume %u", number);
+    else
+        volume_shown(v, shown, sizeof(shown));
+    printf("On %s%s:\n", shown, v && v->Home ? " (home)" : "");
+}
+
 /* The files every word finds — a word finds a file that wears it as a tag and
  * one that is called it (query_word_all) — as a list in file id order the
  * caller frees; no words find every file in the Use Context. The count, or a
@@ -100,15 +125,14 @@ int main(void)
             s_metadata[i].Filename = NULL;
     }
 
-    /* Insertion sort by filename — stable and in place. */
+    /* Insertion sort by volume, then filename — stable and in place. */
     for (int i = 1; i < count; i++)
     {
         FileMetadata key_metadata = s_metadata[i];
         file_id_t    key_id       = s_file_ids[i];
         const char  *key_name     = key_metadata.Filename;
         int j = i - 1;
-        while (j >= 0 && s_metadata[j].Filename && key_name &&
-               strcmp(s_metadata[j].Filename, key_name) > 0)
+        while (j >= 0 && files_before(key_id, key_name, s_file_ids[j], s_metadata[j].Filename))
         {
             s_metadata[j + 1] = s_metadata[j];
             s_file_ids[j + 1] = s_file_ids[j];
@@ -131,12 +155,28 @@ int main(void)
      *
      * The line is sized to the file: the name padded to the listing's column,
      * " [", the tags with ", " between them, and "]\n". */
-    size_t listed = 0;
+    /* Where the files lie is said once for each volume, when they lie on
+     * more than one or on one that is not the home volume. */
+    bool spread = false;
+    for (int i = 0; i < count; i++)
+        spread = spread || volume_of(s_file_ids[i]) != 0;
+    VolumeListed *volumes = NULL;
+    size_t        volume_count = 0;
+    if (spread && volume_list(&volumes, &volume_count) != 0)
+        volume_count = 0;
+
+    size_t   listed = 0;
+    uint32_t said   = UINT32_MAX;
     for (int i = 0; i < count; i++)
     {
         const FileMetadata *metadata = &s_metadata[i];
         if (s_file_ids[i] == 0 || !metadata->Filename)
             continue;
+        if (spread && volume_of(s_file_ids[i]) != said)
+        {
+            said = volume_of(s_file_ids[i]);
+            files_heading(volumes, volume_count, said);
+        }
 
         const char *tags = metadata->Tags ? metadata->Tags : "";
         size_t name_len = strlen(metadata->Filename);
@@ -171,6 +211,7 @@ int main(void)
     for (int i = 0; i < count; i++)
         FileMetadataRelease(&s_metadata[i]);
     free(s_metadata);
+    free(volumes);
 
     souvenir_things(s_file_ids, listed);
 

@@ -33,6 +33,14 @@ int ObjConjugate(const ManifestOp *op, Crate *crates, uint16_t crate_count, cons
 int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Crate *crates,
                         Crate *out);
 
+/* The name `len` bytes at `text` given volume `vol` by the person's hands —
+ * 0 takes it away (volume/volume_name.h). OK once the stitch that carries it
+ * settled, for a kernel caller waited for in its call; ERR_WOULD_BLOCK with
+ * the program parked until that cycle settles or is refused, answered OK,
+ * ERR_TAGFS_NO_SPACE for a name no stitch had room for (the old one kept), or
+ * the cycle's refusal; the name's own refusal (VolumeNameAsk) at once. */
+int SettleVolumeNamed(TagFSVolume *vol, const char *text, size_t len, const OpContext *ctx, Crate *crates);
+
 /*
  * A storage deck handler whose operation the volume answered ERR_WOULD_BLOCK —
  * room a Settle cycle gives back, nothing of the operation done — hands it

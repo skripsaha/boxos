@@ -105,15 +105,17 @@ def FileChanged(spans, fid, was, now):
     _Differed(spans, ground[0], ground[1])
 
 
-def Stitched(spans, before, after, fids, coined, used):
+def Stitched(spans, before, after, fids, coined, used, named=False):
     """One stitch applied: the files it carried a record of, from where it
     found them to where it left them; the tag ids it coined; its Use
-    Context."""
+    Context; the volume's name it gave."""
     for fid in sorted(fids):
         FileChanged(spans, fid, before.get(fid), after.get(fid))
     spans[TAGS].extend((tid, tid + 1) for tid in coined)
     if used:
         spans[USE].append((0, 1))
+    if named:
+        spans[USE].append((1, 2))
 
 
 def _Index(los, key):

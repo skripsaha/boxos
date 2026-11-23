@@ -124,6 +124,8 @@ def BookDeed(medium, start):
     print("book        : " + (f"does not mount — {m.refusal}" if m.refusal else
                               f"mounts on slot {m.slot.index}, {len(m.files)} file(s)"
                               + (", read only" if m.glass else "")))
+    if not m.refusal:
+        print("name        : " + (m.name.decode("utf-8", "replace") if m.name else "none given"))
     return 0
 
 
