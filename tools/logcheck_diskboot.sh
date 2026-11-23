@@ -241,14 +241,17 @@ PY
     make run-stop >/dev/null 2>&1
     if make run-bg UEFI=off CORES=4 MEM=4G BOOTDISK="$SCRATCH/diskboot.blank.img" \
             >"$SCRATCH/diskboot.biosalone.run-bg" 2>&1; then
-        wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt && disks_ask "volumes" && rc=0
+        wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt && rc=0
     else
         harness "diskboot (the stick alone, through a BIOS): run-bg would not start: $(tail -1 "$SCRATCH/diskboot.biosalone.run-bg")"
     fi
     diskboot_halt biosalone || rc=1
     [ $rc = 0 ]
     chk $? "diskboot (the stick alone, through a BIOS): it starts, the hub greets, and the halt ends"
-    diskboot_said biosalone '^  0  Started \(home\) — ' "the stick's volume, laid by the kernel, is the home volume of a BIOS start"
+    diskboot_said biosalone "^\\[TagFS\\] seat [0-9]+ carries the volume this kernel was read out of — the loader said so on its boarding pass" \
+        "stage2, read off the BIOS boot partition, found the stick's volume through the GPT and named it on its boarding pass"
+    diskboot_said biosalone '^\[TagFS\] volume 0 of the house is called "Started"$' \
+        "the stick's volume, laid by the kernel, is the home volume of a BIOS start"
     ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|DEFECT' "$SCRATCH/serial.diskboot.biosalone.log"
     chk $? "diskboot (the stick alone): no panic, no fault, no defect said"
     rm -f build/edk2-vars.fd
