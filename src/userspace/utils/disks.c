@@ -12,6 +12,10 @@
  *                                free run; `add boxos 20G` of that size
  *   disks 1 add efi 512M         an EFI system partition of that size
  *   disks 1 remove 2             BoxOS's partition in entry 2 taken away
+ *   disks 1 grow 2               BoxOS's partition in entry 2 grown into all
+ *                                the free space right after it; `grow 2 40G`
+ *                                to that size — a volume on it takes the
+ *                                ground at its next mount
  *   disks 1 mend                 both copies of disk 1's table put right
  *
  * A disk is named by its number, the seat it sits in. Nothing is changed
@@ -35,7 +39,7 @@
 #include "box/error.h"
 #include "box/system.h"
 
-BOX_FORM("takes optional text \"a disk's number, and new, add, remove or mend\"\n");
+BOX_FORM("takes optional text \"a disk's number, and new, add, remove, grow or mend\"\n");
 
 /* ── telling ─────────────────────────────────────────────────────────────── */
 
@@ -294,6 +298,55 @@ static int disks_remove(const DiskListed *d, const char *what)
     return 0;
 }
 
+static int disks_grow(const DiskListed *d, const char *what)
+{
+    if (*what < '0' || *what > '9') {
+        println("A partition is named by its entry: disks <number> grow <entry> [size]");
+        return 1;
+    }
+    uint32_t entry = 0;
+    while (*what >= '0' && *what <= '9' && entry <= 0xFFFFu) entry = entry * 10u + (uint32_t)(*what++ - '0');
+    while (*what == ' ') what++;
+    uint64_t want = *what ? disks_size(what) : 0;
+    if (*what && !want) {
+        printf("\"%s\" is not a size: 512M, 20G, 1T\n", what);
+        return 1;
+    }
+    const DiskPartListed *p = NULL;
+    for (size_t i = 0; i < d->PartCount; i++)
+        if (d->Parts[i].Entry == entry) p = &d->Parts[i];
+    if (!p) {
+        printf("Disk %u has no partition in entry %u\n", d->Seat, entry);
+        return 1;
+    }
+    int refused = d->Table != DISK_TABLE_GPT ? -ERR_INVALID_STATE : d->Copies ? -ERR_CORRUPTED
+                : p->Kind != DISK_PART_BOXOS ? -ERR_INVALID_ARGUMENT : 0;
+    if (refused) {
+        printf("Entry %u of disk %u does not grow: %s\n", entry, d->Seat,
+               refused == -ERR_INVALID_ARGUMENT ? "only BoxOS's own partitions grow" : disks_refusal(refused));
+        return 1;
+    }
+    char size[24];
+    size_shown(disks_bytes(d, p->Blocks), size, sizeof(size));
+    printf("Entry %u of disk %u, %s, grows into the free space right after it%s%s%s\n", entry, d->Seat, size,
+           want ? " to " : "", want ? what : "", p->Mounted ? " — the volume on it takes it at its next mount" : "");
+    if (!disks_agreed("grow it?")) {
+        println("Nothing was changed");
+        return form_person_here() ? 0 : 1;
+    }
+    uint64_t grown = 0;
+    int      rc    = disk_grow(d, (uint16_t)entry, want ? (want + d->BlockBytes - 1u) / d->BlockBytes : 0, &grown);
+    if (rc != 0) {
+        printf("Entry %u of disk %u stays as it was: %s\n", entry, d->Seat,
+               rc == -ERR_OUT_OF_RANGE ? "there is no free space right after it to grow into, or it is that size"
+                                       : disks_refusal(rc));
+        return 1;
+    }
+    size_shown(disks_bytes(d, grown), size, sizeof(size));
+    printf("Entry %u of disk %u is %s now\n", entry, d->Seat, size);
+    return 0;
+}
+
 static int disks_mend(const DiskListed *d)
 {
     if (d->Table != DISK_TABLE_GPT || !d->Copies) {
@@ -318,7 +371,7 @@ static int disks_mend(const DiskListed *d)
 
 static int disks_usage(void)
 {
-    println("disks, or disks <number> [new | add boxos [size] | add efi <size> | remove <entry> | mend]");
+    println("disks, or disks <number> [new | add boxos [size] | add efi <size> | remove <entry> | grow <entry> [size] | mend]");
     return 1;
 }
 
@@ -350,6 +403,7 @@ static int disks_run(const char *text, DiskListed *disks, size_t count)
     if (strcmp(text, "mend") == 0) return disks_mend(d);
     if (strncmp(text, "add ", 4) == 0) return disks_add(d, text + 4);
     if (strncmp(text, "remove ", 7) == 0) return disks_remove(d, text + 7);
+    if (strncmp(text, "grow ", 5) == 0) return disks_grow(d, text + 5);
     return disks_usage();
 }
 

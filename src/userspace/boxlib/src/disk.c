@@ -189,6 +189,17 @@ int disk_mend(const DiskListed *disk)
     return disk_changed(HW_DISK_MEND, disk, NULL, 0, NULL, 0);
 }
 
+int disk_grow(const DiskListed *disk, uint16_t entry, uint64_t blocks, uint64_t *grown)
+{
+    uint8_t  more[10];
+    uint64_t now = 0;
+    memcpy(more, &entry, 2);
+    memcpy(more + 2, &blocks, 8);
+    int rc = disk_changed(HW_DISK_GROW, disk, more, sizeof(more), &now, sizeof(now));
+    if (rc == 0 && grown) *grown = now;
+    return rc;
+}
+
 int volume_lay(const DiskListed *disk, uint16_t entry, const char *name, uint32_t *number, uint32_t *roles)
 {
     size_t  len = name ? strlen(name) : 0;

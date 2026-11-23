@@ -241,6 +241,28 @@ int HwDiskRemove(const ManifestOp* op, Crate* crates, uint16_t crate_count, cons
     return (int)DiskTableRemove(seat, seating, entry, &used);
 }
 
+/* HW_DISK_GROW  params: [u8 seat][u32 seating][u16 entry][u64 blocks];
+ * out_crate (optional): [u64 blocks] */
+int HwDiskGrow(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx)
+{
+    (void)crate_count;
+    uint8_t       seat;
+    uint32_t      seating;
+    DisksStanding standing;
+    DiskInUse     used;
+    int           rc = DisksAsked(op, 10, ctx, &seat, &seating, &standing, &used);
+    if (rc != OK)
+        return rc;
+    uint16_t entry;
+    uint64_t blocks, grown = 0;
+    memcpy(&entry, op->params + 5, 2);
+    memcpy(&blocks, op->params + 7, 8);
+    rc = (int)DiskTableGrow(seat, seating, entry, blocks, &grown);
+    if (rc == OK && op->out_crate != CRATE_INDEX_NONE && crate_write(&crates[op->out_crate], ctx, &grown, 8) != OK)
+        return ERR_INVALID_ADDRESS;
+    return rc;
+}
+
 /* HW_DISK_MEND  params: [u8 seat][u32 seating] */
 int HwDiskMend(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx)
 {

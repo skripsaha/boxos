@@ -129,6 +129,17 @@ error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t
  * ERR_CORRUPTED as DiskTableAdd's. */
 error_t DiskTableRemove(uint8_t seat, uint32_t seating, uint16_t entry, const DiskInUse* used);
 
+/* BoxOS's partition in `entry` grown into the room right after it — up to the
+ * next partition, or the last block the table may use — to `blocks` long, or
+ * all of that room for 0; its length kept a whole number of the volume's own
+ * blocks. A volume of the house standing on it takes the ground at its next
+ * mount, as a volume takes the ground behind it. ERR_OUT_OF_RANGE for no
+ * partition there, no room after it, or a length it already reaches;
+ * ERR_INVALID_ARGUMENT for one of another kind; ERR_INVALID_STATE and
+ * ERR_CORRUPTED as DiskTableAdd's. *grown (NULL for none) the length it has
+ * now. */
+error_t DiskTableGrow(uint8_t seat, uint32_t seating, uint16_t entry, uint64_t blocks, uint64_t* grown);
+
 /* Both copies of a GPT written from the one read — the far one at the end of
  * the disk, a table made for a smaller one given the blocks it never knew of:
  * OK, nothing written, when they hold and agree. ERR_INVALID_STATE for a disk

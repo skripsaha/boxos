@@ -2,6 +2,7 @@
 #include "disk_table_internal.h"
 #include "boardroom.h"
 #include "random.h"
+#include "volume_deed.h"
 #include "klib.h"
 #include "crypto.h"
 
@@ -430,6 +431,60 @@ error_t DiskTableRemove(uint8_t seat, uint32_t seating, uint16_t entry, const Di
         if (rc == OK)
             kprintf("[DiskTable] seat %u: entry %u taken away — blocks %llu..%llu are free\n", seat, entry,
                     (unsigned long long)part->first, (unsigned long long)part->last);
+    }
+    kfree(p.entries);
+    DiskChangeEnd(&t);
+    return rc;
+}
+
+error_t DiskTableGrow(uint8_t seat, uint32_t seating, uint16_t entry, uint64_t blocks, uint64_t* grown)
+{
+    DiskTable t;
+    error_t   rc = DiskChangeBegin(seat, seating, &t);
+    if (rc != OK)
+        return rc;
+    rc = DiskChangeable(&t);
+
+    const DiskPart* part = NULL;
+    uint64_t        end  = t.last_usable + 1u;      /* the first block past the room after it */
+    for (uint32_t i = 0; rc == OK && i < t.part_count; i++)
+        if (t.parts[i].entry == entry) {
+            part = &t.parts[i];
+            if (i + 1u < t.part_count)
+                end = t.parts[i + 1u].first;
+        }
+    if (rc == OK && !part)
+        rc = ERR_OUT_OF_RANGE;
+    else if (rc == OK && part->kind != DISK_PART_BOXOS) {
+        kprintf("[DiskTable] seat %u: entry %u is a %s partition — only BoxOS's own grow\n", seat, entry,
+                DiskKindName(part->kind));
+        rc = ERR_INVALID_ARGUMENT;
+    }
+
+    /* A whole number of the volume's own blocks, so the volume can take it all. */
+    uint64_t per  = VOLUME_BLOCK_BYTES > t.block_bytes ? VOLUME_BLOCK_BYTES / t.block_bytes : 1u;
+    uint64_t have = rc == OK ? part->last - part->first + 1u : 0;
+    uint64_t most = rc == OK ? (end - part->first) / per * per : 0;
+    uint64_t want = blocks ? blocks / per * per : most;
+    if (rc == OK && (want <= have || want > most)) {
+        kprintf("[DiskTable] seat %u: entry %u is %llu block(s) and may grow to %llu — %llu is no growth\n", seat,
+                entry, (unsigned long long)have, (unsigned long long)most, (unsigned long long)want);
+        rc = ERR_OUT_OF_RANGE;
+    }
+
+    DiskPlan p;
+    memset(&p, 0, sizeof(p));
+    if (rc == OK)
+        rc = DiskPlanOf(&t, &p);
+    if (rc == OK) {
+        DiskPutLe64(p.entries + (uint64_t)entry * p.entry_bytes + GPT_ENTRY_LAST_OFFSET, part->first + want - 1u);
+        rc = DiskPlanWrite(&t, &p, false, "a partition grown");
+        if (rc == OK) {
+            kprintf("[DiskTable] seat %u: entry %u grows from %llu to %llu block(s) — a volume on it takes the "
+                    "ground at its next mount\n", seat, entry, (unsigned long long)have, (unsigned long long)want);
+            if (grown)
+                *grown = want;
+        }
     }
     kfree(p.entries);
     DiskChangeEnd(&t);

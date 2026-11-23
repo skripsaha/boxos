@@ -17,6 +17,7 @@ int HwDiskLay(const ManifestOp* op, Crate* crates, uint16_t crate_count, const O
 int HwDiskAdd(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx);
 int HwDiskRemove(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx);
 int HwDiskMend(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx);
+int HwDiskGrow(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx);
 
 /*
  * Prove, on this machine, that asking the hardware deck to put a USB controller

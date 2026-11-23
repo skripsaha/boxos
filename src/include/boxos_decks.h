@@ -713,6 +713,12 @@
  *   hw.disk.mend    both copies of a GPT written from the one read, the far
  *                   one at the end of the disk; OK and nothing written when
  *                   they hold and agree
+ *   hw.disk.grow    params + [u16 entry][u64 blocks]: BoxOS's own partition
+ *                   grown into the room right after it, to `blocks` long or
+ *                   all of that room for 0, a whole number of the volume's
+ *                   blocks; out_crate (optional) [u64 blocks], its length now.
+ *                   A volume standing on it takes the ground at its next
+ *                   mount; ERR_OUT_OF_RANGE for no room, or no growth
  * The answers DiskTable's (disk_table.h): ERR_OBJECT_NOT_FOUND for a seat that
  * is empty or holds another disk since; ERR_WOULD_BLOCK while another change
  * of a table is under way; ERR_INVALID_STATE for a disk with no GPT to change;
@@ -725,6 +731,7 @@
 #define HW_DISK_ADD           0x53
 #define HW_DISK_REMOVE        0x54
 #define HW_DISK_MEND          0x55
+#define HW_DISK_GROW          0x56
 
 /* The screen is lent to the one system program that draws (screen.h). */
 #define HW_SCREEN_CLAIM         0x60

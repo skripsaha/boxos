@@ -78,6 +78,12 @@ int disk_add(const DiskListed *disk, uint8_t kind, uint64_t first, uint64_t bloc
 int disk_remove(const DiskListed *disk, uint16_t entry);
 int disk_mend(const DiskListed *disk);
 
+/* BoxOS's partition in `entry` grown into the room right after it, to
+ * `blocks` long or all of that room for 0; its length now in *grown (NULL for
+ * none). A volume standing on it takes the ground at its next mount.
+ * -ERR_OUT_OF_RANGE for no room after it, or a length it already reaches. */
+int disk_grow(const DiskListed *disk, uint16_t entry, uint64_t blocks, uint64_t *grown);
+
 /* A new volume laid on BoxOS's partition in `entry` of `disk`, called `name`
  * (NULL or "" for none), and given the system — every file the home volume
  * keeps in a role, the kernel its Deed names for a loader — by the person's
