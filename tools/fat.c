@@ -16,6 +16,8 @@
  *   fat IMG rm PATH                               PATH taken away
  *   fat IMG open                                  the FAT32 read, and its layout
  *                                                 said: nothing written
+ *   fat IMG ls PATH                               the directory's entries, one a
+ *                                                 line: "d NAME" or "f SIZE NAME"
  *
  * Options before the command: --sector N, the FAT's sector (512, or 4096 for a
  * 4Kn medium); --at N, the sector of IMG the FAT begins at (a partition of a
@@ -105,7 +107,7 @@ static int Usage(void)
 {
     fprintf(stderr, "usage: fat [--sector N] [--at N] [--hidden N] [--time N] IMG "
                     "lay SIZE|least [--label L] [--id N] | put PATH FILE | zeros PATH BYTES | mkdir PATH | "
-                    "get PATH OUT | run PATH | rm PATH | open\n");
+                    "get PATH OUT | run PATH | rm PATH | open | ls PATH\n");
     return 2;
 }
 
@@ -142,6 +144,14 @@ static int Lay(Image* im, FatMedium* m, int argc, char** argv, uint64_t hidden)
     return 0;
 }
 
+static int Listed(void* ctx, const char* name, const FatEntry* e)
+{
+    (void)ctx;
+    if (e->attr & FAT_ATTR_DIRECTORY) printf("d %s\n", name);
+    else printf("f %u %s\n", e->size, name);
+    return 0;
+}
+
 static int Command(FatVolume* v, const char* cmd, int argc, char** argv, uint64_t at)
 {
     int rc = FAT_OK;
@@ -151,7 +161,9 @@ static int Command(FatVolume* v, const char* cmd, int argc, char** argv, uint64_
                (long long)v->free_count);
         return 0;
     }
-    if (strcmp(cmd, "put") == 0 && argc == 2) {
+    if (strcmp(cmd, "ls") == 0 && argc <= 1) {
+        rc = FatEach(v, argc ? argv[0] : "", Listed, NULL);
+    } else if (strcmp(cmd, "put") == 0 && argc == 2) {
         FILE* f = fopen(argv[1], "rb");
         if (!f) {
             fprintf(stderr, "fat: %s: %s\n", argv[1], strerror(errno));

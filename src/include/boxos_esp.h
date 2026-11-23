@@ -16,12 +16,28 @@
  * (ESP_FALLBACK, UEFI 2.10 §3.5.1), written on an ESP of BoxOS's own alone —
  * never on one another system shares, whose default is that system's.
  *
- * Paths are parted by '/', as src/include/fat.h takes them.
+ * Paths are parted by '/', as src/include/fat.h takes them. Integer types
+ * come from the includer, as volume_deed.h's do.
  */
 
 #define ESP_DIR           "EFI/BoxOS"
 #define ESP_LOADER        "EFI/BoxOS/gangway.efi"   /* the loader a boot option names */
 #define ESP_FALLBACK      "EFI/BOOT/BOOTX64.EFI"    /* the removable-media default, x64 */
 #define ESP_LOADER_KEPT   "gangway.efi"             /* the loader as a volume keeps it, in the system's role */
+
+/*
+ * What a boot option of BoxOS's carries past its file — EFI_LOAD_OPTION's
+ * OptionalData, handed to the loader it starts as its LoadOptions (UEFI 2.10
+ * §3.1.3): the volume to boot, by the uuid its Deed holds, so a machine with
+ * more than one volume starts the one installed. A start by the
+ * removable-media default carries none, and Gangway boots the volume it
+ * finds.
+ */
+#define ESP_VOLUME_MAGIC  "BoxOSVol"                /* 8 bytes, no terminator */
+
+typedef struct __attribute__((packed)) {
+    uint8_t magic[8];
+    uint8_t uuid[16];
+} EspVolumeAsked;
 
 #endif /* BOXOS_ESP_H */

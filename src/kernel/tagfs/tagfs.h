@@ -715,6 +715,13 @@ error_t  TagFSQueryPage(TagFSVolume* vol, TagOwner owner, const TagSpelling* tag
  * fresh system is given. */
 error_t  TagFSShippedPage(TagFSVolume* vol, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                           TagFSPage* page);
+
+/* The file `vol` keeps in a role and calls `name` — a name the system's own,
+ * like the loader's (boxos_esp.h) — read whole into a kmalloc'd *out, the
+ * caller's to kfree, its length in *bytes. OK; ERR_FILE_NOT_FOUND for none;
+ * ERR_OUT_OF_RANGE for one longer than `most`; ERR_DEVICE_NOT_READY for a
+ * volume not mounted; a read's refusal; ERR_NO_MEMORY. */
+error_t  TagFSKeptRead(TagFSVolume* vol, const char* name, uint32_t most, uint8_t** out, uint32_t* bytes);
 error_t  TagFSListPage(TagFSVolume* vol, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
 /* The same question asked of the files kept deleted alone: those that wear all

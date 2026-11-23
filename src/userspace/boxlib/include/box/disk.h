@@ -78,6 +78,23 @@ int disk_add(const DiskListed *disk, uint8_t kind, uint64_t first, uint64_t bloc
 int disk_remove(const DiskListed *disk, uint16_t entry);
 int disk_mend(const DiskListed *disk);
 
+/* What making BoxOS start from an ESP did (disk_boot). */
+typedef struct {
+    uint16_t Option;        /* the firmware's Boot#### given, when Given */
+    bool     Given;         /* a boot option given: a start through UEFI */
+    bool     Fallback;      /* the ESP's removable-media default written: the ESP is BoxOS's own */
+} DiskBooted;
+
+/* BoxOS made to start from the ESP in `entry` of `disk`: the loader the
+ * volume numbered `volume` keeps — a volume on that disk — put on the ESP,
+ * and the firmware given a boot option naming it, first in its order for
+ * `first`. 0, and what was done in *booted (NULL for none); or a negative
+ * -error_t: -ERR_INVALID_ARGUMENT for an entry that is no ESP or a volume not
+ * on the disk, -ERR_FILE_NOT_FOUND for a volume that keeps no loader,
+ * -ERR_CORRUPTED for an ESP that is no FAT32, -ERR_TAGFS_NO_SPACE for one
+ * with no room. */
+int disk_boot(const DiskListed *disk, uint16_t entry, uint32_t volume, bool first, DiskBooted *booted);
+
 /* BoxOS's partition in `entry` grown into the room right after it, to
  * `blocks` long or all of that room for 0; its length now in *grown (NULL for
  * none). A volume standing on it takes the ground at its next mount.

@@ -376,6 +376,9 @@ typedef struct {
     uint32_t       free_run, free_first;
     uint32_t       live;        /* entries met but "." and ".." */
     FatEntry       found;
+    int          (*each)(void* ctx, const char* name, const FatEntry* e);    /* FatEach's, or NULL */
+    void*          each_ctx;
+    int            each_said;
 } DirLook;
 
 /* The look at slot `slot` (`e`): 1 when the walk is to stop, 0 to go on. */
@@ -424,6 +427,22 @@ static int SlotLook(FatVolume* v, DirLook* d, uint32_t dir, uint32_t slot, const
     if (e[0] == '.' && (e[1] == ' ' || (e[1] == '.' && e[2] == ' ')))
         return 0;
     d->live++;
+    if (d->each) {
+        char     name[FAT_NAME_MOST + 1];
+        uint32_t n = 0;
+        if (long_named)
+            while (n < d->lfn_count * FAT_LONG_CHARS && n < FAT_NAME_MOST && d->lfn[n] && d->lfn[n] != 0xFFFFu) {
+                name[n] = d->lfn[n] < 0x80u ? (char)d->lfn[n] : '?';
+                n++;
+            }
+        else
+            n = ShortSpelled(e, (uint8_t*)name);
+        name[n]  = 0;
+        FatEntry entry = { .cluster = (uint32_t)Get16(e + 20) << 16 | Get16(e + 26), .size = Get32(e + 28),
+                           .attr = e[11], .dir = dir, .first_slot = long_named ? d->lfn_first : slot, .slot = slot };
+        d->each_said = d->each(d->each_ctx, name, &entry);
+        return d->each_said != 0;
+    }
     int match = 0;
     if (d->alias)
         match = SameName(e, 11, d->alias, 11);
@@ -950,6 +969,22 @@ int FatPut(FatVolume* v, const char* path, const void* data, uint32_t bytes, Fat
     if (out)
         *out = made;
     return FAT_OK;
+}
+
+int FatEach(FatVolume* v, const char* path, int (*each)(void* ctx, const char* name, const FatEntry* e), void* ctx)
+{
+    FatEntry dir;
+    int      rc = FatFind(v, path, &dir);
+    if (rc != FAT_OK)
+        return rc;
+    if (!(dir.attr & FAT_ATTR_DIRECTORY))
+        return FAT_NOT_DIRECTORY;
+    DirLook d;
+    Fill((uint8_t*)&d, 0, sizeof(d));
+    d.each     = each;
+    d.each_ctx = ctx;
+    rc         = DirWalk(v, dir.cluster ? dir.cluster : v->root, &d, NULL);
+    return rc == FAT_NOT_FOUND ? FAT_OK : rc == FAT_OK ? d.each_said : rc;
 }
 
 int64_t FatRead(FatVolume* v, const FatEntry* e, uint32_t offset, void* into, uint32_t bytes)

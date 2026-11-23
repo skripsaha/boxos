@@ -12,6 +12,10 @@
  *                                free run; `add boxos 20G` of that size
  *   disks 1 add efi 512M         an EFI system partition of that size
  *   disks 1 remove 2             BoxOS's partition in entry 2 taken away
+ *   disks 1 boot 0 2             BoxOS made to start from the ESP in entry 0:
+ *                                the loader volume 2 keeps put on it, and the
+ *                                machine's firmware told of it — first in its
+ *                                order if the person says so
  *   disks 1 grow 2               BoxOS's partition in entry 2 grown into all
  *                                the free space right after it; `grow 2 40G`
  *                                to that size — a volume on it takes the
@@ -40,7 +44,7 @@
 #include "box/system.h"
 #include "fat.h"
 
-BOX_FORM("takes optional text \"a disk's number, and new, add, remove, grow or mend\"\n");
+BOX_FORM("takes optional text \"a disk's number, and new, add, remove, grow, boot or mend\"\n");
 
 /* ── telling ─────────────────────────────────────────────────────────────── */
 
@@ -358,6 +362,70 @@ static int disks_grow(const DiskListed *d, const char *what)
     return 0;
 }
 
+/* What a refused boot answers. */
+static const char *disks_boot_refusal(int rc)
+{
+    switch (-rc) {
+    case ERR_INVALID_ARGUMENT: return "the volume does not stand on this disk";
+    case ERR_FILE_NOT_FOUND:   return "the volume keeps no loader";
+    case ERR_CORRUPTED:        return "the ESP does not read as a FAT32";
+    case ERR_TAGFS_NO_SPACE:   return "the ESP has no room for the loader";
+    case ERR_WRITE_FAILED:     return "the disk or the firmware refused a write";
+    default:                   return disks_refusal(rc);
+    }
+}
+
+static int disks_boot(const DiskListed *d, const char *what)
+{
+    uint32_t entry = 0, volume = 0;
+    bool     read  = *what >= '0' && *what <= '9';
+    while (*what >= '0' && *what <= '9' && entry <= 0xFFFFu) entry = entry * 10u + (uint32_t)(*what++ - '0');
+    while (*what == ' ') what++;
+    read = read && *what >= '0' && *what <= '9';
+    while (*what >= '0' && *what <= '9' && volume <= 0xFFFFu) volume = volume * 10u + (uint32_t)(*what++ - '0');
+    if (!read || *what) {
+        println("BoxOS is made to start from an ESP: disks <number> boot <the ESP's entry> <a volume on the disk>");
+        return 1;
+    }
+    const DiskPartListed *esp = NULL;
+    bool                  on  = false;
+    for (size_t i = 0; i < d->PartCount; i++) {
+        if (d->Parts[i].Entry == entry) esp = &d->Parts[i];
+        on |= d->Parts[i].Volume == volume + 1u;
+    }
+    if (!esp || esp->Kind != DISK_PART_ESP || d->Table != DISK_TABLE_GPT) {
+        printf("Entry %u of disk %u is no EFI system partition of a GPT: `disks %u add efi <size>` lays one\n", entry,
+               d->Seat, d->Seat);
+        return 1;
+    }
+    if (!on) {
+        printf("Volume %u does not stand on disk %u: the loader on an ESP starts a volume of its own disk\n", volume,
+               d->Seat);
+        return 1;
+    }
+    printf("BoxOS is to start from the ESP in entry %u of disk %u: the loader volume %u keeps goes on it, and the "
+           "machine's firmware is told of it\n", entry, d->Seat, volume);
+    if (!disks_agreed("go on?")) {
+        println("Nothing was changed");
+        return form_person_here() ? 0 : 1;
+    }
+    bool       first  = form_yes("Start BoxOS first when the machine starts?");
+    DiskBooted booted = { 0 };
+    int        rc     = disk_boot(d, (uint16_t)entry, volume, first, &booted);
+    if (rc != 0) {
+        printf("BoxOS was not made to start from disk %u: %s\n", d->Seat, disks_boot_refusal(rc));
+        return 1;
+    }
+    printf("BoxOS starts from the ESP in entry %u of disk %u%s\n", entry, d->Seat,
+           booted.Fallback ? " — its loader is the ESP's default too, the ESP being BoxOS's own" : "");
+    if (booted.Given)
+        printf("The firmware's boot option %04X starts it, %s\n", booted.Option,
+               first ? "first when the machine starts" : "among the others: the firmware's menu offers it");
+    else
+        println("This start knows no firmware to tell (a BIOS start): the firmware is not given a boot option");
+    return 0;
+}
+
 static int disks_mend(const DiskListed *d)
 {
     if (d->Table != DISK_TABLE_GPT || !d->Copies) {
@@ -382,7 +450,7 @@ static int disks_mend(const DiskListed *d)
 
 static int disks_usage(void)
 {
-    println("disks, or disks <number> [new | add boxos [size] | add efi <size> | remove <entry> | grow <entry> [size] | mend]");
+    println("disks, or disks <number> [new | add boxos [size] | add efi <size> | remove <entry> | grow <entry> [size] | boot <entry> <volume> | mend]");
     return 1;
 }
 
@@ -415,6 +483,7 @@ static int disks_run(const char *text, DiskListed *disks, size_t count)
     if (strncmp(text, "add ", 4) == 0) return disks_add(d, text + 4);
     if (strncmp(text, "remove ", 7) == 0) return disks_remove(d, text + 7);
     if (strncmp(text, "grow ", 5) == 0) return disks_grow(d, text + 5);
+    if (strncmp(text, "boot ", 5) == 0) return disks_boot(d, text + 5);
     return disks_usage();
 }
 

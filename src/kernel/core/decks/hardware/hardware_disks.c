@@ -18,6 +18,8 @@
 #include "crate_io.h"
 #include "process.h"
 #include "manifest_auth.h"
+#include "disk_boot.h"
+#include "boxos_esp.h"
 #include "tagfs.h"
 #include "boardroom.h"
 #include "disk_table.h"
@@ -260,6 +262,54 @@ int HwDiskGrow(const ManifestOp* op, Crate* crates, uint16_t crate_count, const 
     rc = (int)DiskTableGrow(seat, seating, entry, blocks, &grown);
     if (rc == OK && op->out_crate != CRATE_INDEX_NONE && crate_write(&crates[op->out_crate], ctx, &grown, 8) != OK)
         return ERR_INVALID_ADDRESS;
+    return rc;
+}
+
+/* The loader BoxOS puts on an ESP is a few hundred KiB; one past this is no
+ * loader of this system's. */
+#define DISKS_LOADER_MOST  (16u << 20)
+
+/* HW_DISK_BOOT  params: [u8 seat][u32 seating][u16 entry][u32 volume][u8 first];
+ * out_crate (optional): [u16 option][u8 option given][u8 default written] */
+int HwDiskBoot(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx)
+{
+    (void)crate_count;
+    uint8_t       seat;
+    uint32_t      seating, number;
+    DisksStanding standing;
+    DiskInUse     used;
+    int           rc = DisksAsked(op, 7, ctx, &seat, &seating, &standing, &used);
+    if (rc != OK)
+        return rc;
+    DiskBootAsk a = { .seat = seat, .seating = seating, .first = op->params[11] != 0 };
+    memcpy(&a.entry, op->params + 5, 2);
+    memcpy(&number, op->params + 7, 4);
+    bool on = false;
+    for (uint32_t i = 0; i < standing.count; i++)
+        on |= standing.numbers[i] == number;
+    TagFSVolume* vol = on ? TagFSVolumeNumbered(number) : NULL;
+    if (!vol) {
+        kprintf("[DiskBoot] seat %u: volume %u does not stand on this disk — a loader on its ESP starts a volume of "
+                "its own disk\n", seat, number);
+        return ERR_INVALID_ARGUMENT;
+    }
+    uint8_t* loader = NULL;
+    rc = (int)TagFSKeptRead(vol, ESP_LOADER_KEPT, DISKS_LOADER_MOST, &loader, &a.loader_bytes);
+    if (rc == ERR_FILE_NOT_FOUND)
+        kprintf("[DiskBoot] volume %u keeps no %s — there is no loader of its to put on an ESP\n", number,
+                ESP_LOADER_KEPT);
+    if (rc != OK)
+        return rc;
+    a.loader = loader;
+    TagFSVolumeUuid(vol, a.uuid);
+    DiskBootSaid said;
+    rc = (int)DiskBootLay(&a, &said);
+    kfree(loader);
+    if (rc == OK && op->out_crate != CRATE_INDEX_NONE) {
+        uint8_t answer[4] = { (uint8_t)said.number, (uint8_t)(said.number >> 8), said.option, said.fallback };
+        if (crate_write(&crates[op->out_crate], ctx, answer, sizeof(answer)) != OK)
+            return ERR_INVALID_ADDRESS;
+    }
     return rc;
 }
 

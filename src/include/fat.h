@@ -198,6 +198,15 @@ int FatMakeDirs(FatVolume* v, const char* path, FatEntry* out);
  * FAT_OK, FAT_NO_ROOM, FAT_NOT_DIRECTORY, FAT_BAD_NAME, FAT_DAMAGED, FAT_IO. */
 int FatPut(FatVolume* v, const char* path, const void* data, uint32_t bytes, FatEntry* out);
 
+/* Every entry of the directory at `path` — but "." and "..", a volume's
+ * label and long names that do not check out — handed to `each` with its
+ * name (its long one when it has one, else its short one as it reads, ended;
+ * a long name of other than ASCII spelled with '?' for every other
+ * character) and its entry, in the order they lie, until `each` answers not
+ * 0: that answer, or FAT_OK at the end. FAT_NOT_FOUND, FAT_NOT_DIRECTORY,
+ * FAT_BAD_NAME, FAT_DAMAGED, FAT_IO. `each` may not call into `v`. */
+int FatEach(FatVolume* v, const char* path, int (*each)(void* ctx, const char* name, const FatEntry* e), void* ctx);
+
 /* `bytes` of the file `e` from `offset` into `into`; past its end is not read.
  * The bytes read, or a FatVerdict below 0. */
 int64_t FatRead(FatVolume* v, const FatEntry* e, uint32_t offset, void* into, uint32_t bytes);

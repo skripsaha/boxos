@@ -722,6 +722,19 @@
  *   hw.disk.mend    both copies of a GPT written from the one read, the far
  *                   one at the end of the disk; OK and nothing written when
  *                   they hold and agree
+ *   hw.disk.boot    params + [u16 entry][u32 volume][u8 first]: BoxOS made to
+ *                   start from the ESP in `entry` — the loader the volume
+ *                   numbered `volume` keeps (it stands on this disk) put on
+ *                   the ESP under BoxOS's own directory, and as its
+ *                   removable-media default when the ESP is BoxOS's own; the
+ *                   firmware given a boot option naming it and the volume,
+ *                   first in its order for `first` 1, last for 0. out_crate
+ *                   (optional) [u16 option][u8 option given][u8 default
+ *                   written]. ERR_INVALID_ARGUMENT for an entry that is no ESP
+ *                   or a volume not on this disk; ERR_FILE_NOT_FOUND for a
+ *                   volume that keeps no loader; ERR_CORRUPTED for an ESP whose
+ *                   FAT32 does not read; ERR_TAGFS_NO_SPACE for one with no
+ *                   room. A start with no firmware runtime gives no option
  *   hw.disk.grow    params + [u16 entry][u64 blocks]: BoxOS's own partition
  *                   grown into the room right after it, to `blocks` long or
  *                   all of that room for 0, a whole number of the volume's
@@ -741,6 +754,7 @@
 #define HW_DISK_REMOVE        0x54
 #define HW_DISK_MEND          0x55
 #define HW_DISK_GROW          0x56
+#define HW_DISK_BOOT          0x57
 
 /* The screen is lent to the one system program that draws (screen.h). */
 #define HW_SCREEN_CLAIM         0x60
