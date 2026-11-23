@@ -7,10 +7,11 @@
  * BoxOS's loader on the ESP and the firmware's entry for it — and what stays:
  * every other system's partitions, untouched. Signed for by the disk's name.
  * Then each volume is put away, the disk is made to start BoxOS no more
- * (disk_unboot), BoxOS's partitions are taken away, and the ESP and the BIOS
- * boot partition with them when they hold nothing of anyone else — an ESP
- * that starts Windows stays. Every step looks at the disk as it is, so
- * removing again after a cut goes on where the last one stopped.
+ * (disk_unboot), the ESP and the BIOS boot partition are taken away when they
+ * hold nothing of anyone else — an ESP that starts Windows stays — and
+ * BoxOS's partitions last. Every step looks at the disk as it is, and what
+ * says BoxOS is there goes last, so removing again after a cut goes on where
+ * the last one stopped.
  */
 
 #include "install.h"
@@ -159,20 +160,22 @@ int Remove(const char *Words)
         Tell("  its loader taken off the ESP" + std::string(Unbooted.Options ? ", the firmware's entry for it with it"
                                                                            : ""));
     }
-    /* BoxOS's partitions first, then what held only BoxOS's loaders. */
+    /* What held only BoxOS's loaders first — the kernel judges the BIOS boot
+     * partition by what lies in it, and keeps another's —, BoxOS's partitions
+     * last: while one stands, removing again after a cut takes up the rest. */
     for (int Pass = 0; Pass < 2; Pass++) {
         if (!(Disk = Again(Now, Wanted))) return 1;
         std::vector<std::uint16_t> Going;
         for (std::size_t P = 0; P < Disk->PartCount; P++) {
             const DiskPartListed &Part = Disk->Parts[P];
-            bool Ours = Pass == 0 ? Part.Kind == DISK_PART_BOXOS
+            bool Ours = Pass == 1 ? Part.Kind == DISK_PART_BOXOS
                                   : (Part.Kind == DISK_PART_ESP && !Part.LoaderCount && !Part.DefaultLoader) ||
                                         Part.Kind == DISK_PART_BIOS_BOOT;
             if (Ours) Going.push_back(Part.Entry);
         }
         for (std::uint16_t Entry : Going) {
             int Rc = disk_remove(Disk, Entry);
-            if (Rc != 0 && !(Pass == 1 && Rc == -ERR_INVALID_ARGUMENT)) {
+            if (Rc != 0 && !(Pass == 0 && Rc == -ERR_INVALID_ARGUMENT)) {
                 Tell("  entry " + std::to_string(Entry) + " could not be taken away: " + Refused(Rc));
                 return 1;
             }

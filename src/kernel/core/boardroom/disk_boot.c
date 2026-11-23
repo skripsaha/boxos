@@ -358,21 +358,23 @@ static int EspCleared(const DiskUnbootAsk* a, const DiskPart* part, uint32_t blo
                 rc = dir_gone;      /* another file keeping the directory keeps it */
         }
     }
-    if (rc == FAT_OK) {
+    /* The directory is taken away last: while it stands, the disk still
+     * shows BoxOS's loader, and removing again takes up what is left. */
+    while (rc == FAT_OK) {
+        memset(d, 0, sizeof(*d));
         int listed = FatEach(v, ESP_DIR, DirNamed, d);
-        if (listed == FAT_NOT_FOUND) {
-            rc = FAT_OK;
-        } else {
-            rc = listed;
-            for (uint32_t i = 0; rc == FAT_OK && i < d->count; i++) {
-                char path[sizeof(ESP_DIR) + FAT_NAME_MOST + 2];
-                ksnprintf(path, sizeof(path), "%s/%s", ESP_DIR, d->names[i]);
-                rc = FatRemove(v, path);
-            }
-            if (rc == FAT_OK && !d->more) {
-                rc           = FatRemove(v, ESP_DIR);
-                said->loader = rc == FAT_OK;
-            }
+        if (listed == FAT_NOT_FOUND)
+            break;
+        rc = listed;
+        for (uint32_t i = 0; rc == FAT_OK && i < d->count; i++) {
+            char path[sizeof(ESP_DIR) + FAT_NAME_MOST + 2];
+            ksnprintf(path, sizeof(path), "%s/%s", ESP_DIR, d->names[i]);
+            rc = FatRemove(v, path);
+        }
+        if (rc == FAT_OK && !d->more) {
+            rc           = FatRemove(v, ESP_DIR);
+            said->loader = rc == FAT_OK;
+            break;
         }
     }
     kfree(v);
@@ -408,20 +410,10 @@ error_t DiskBootTakeAway(const DiskUnbootAsk* a, DiskUnbootSaid* said)
         return rc;
 
     DiskBootAsk asked = { .seat = a->seat, .seating = a->seating, .entry = a->entry };
-    int         fat   = EspCleared(a, &part, block_bytes, said);
-    if (fat != FAT_OK)
-        return EspRefusal(&asked, fat, "the taking away of BoxOS's loader");
 
-    EfiPartition where = { .number = (uint32_t)a->entry + 1u, .first = part.first,
-                           .blocks = part.last - part.first + 1u };
-    memcpy(where.unique, part.unique, 16);
-    rc = EfiBootOptionsTakeAway(&where, ESP_LOADER, &said->options);
-    if (rc == ERR_UNSUPPORTED)
-        rc = OK;            /* a BIOS start: no firmware to tell */
-    if (rc != OK)
-        return rc;
-
-    /* The boot sector's code, when it is BoxOS's: taken off, the table kept. */
+    /* The boot sector's code first, the firmware's entries next, BoxOS's
+     * directory on the ESP last: a cut anywhere leaves that directory, so
+     * removing again comes back here and takes up what is left. */
     if (a->stage1 && a->stage1_bytes == BIOS_SECTOR_BYTES && block_bytes == BIOS_SECTOR_BYTES) {
         DiskFatPlace head;
         uint8_t      sector[BIOS_SECTOR_BYTES];
@@ -435,6 +427,19 @@ error_t DiskBootTakeAway(const DiskUnbootAsk* a, DiskUnbootSaid* said)
             said->bios = true;
         }
     }
+
+    EfiPartition where = { .number = (uint32_t)a->entry + 1u, .first = part.first,
+                           .blocks = part.last - part.first + 1u };
+    memcpy(where.unique, part.unique, 16);
+    rc = EfiBootOptionsTakeAway(&where, ESP_LOADER, &said->options);
+    if (rc == ERR_UNSUPPORTED)
+        rc = OK;            /* a BIOS start: no firmware to tell */
+    if (rc != OK)
+        return rc;
+
+    int fat = EspCleared(a, &part, block_bytes, said);
+    if (fat != FAT_OK)
+        return EspRefusal(&asked, fat, "the taking away of BoxOS's loader");
     kprintf("[DiskBoot] seat %u: BoxOS starts from it no more — %s%s%u boot option(s) of the firmware taken "
             "away%s\n", a->seat, said->loader ? "its directory taken off the ESP, " : "",
             said->fallback ? "the ESP's default with it, being BoxOS's, " : "", said->options,
