@@ -49,12 +49,14 @@ twovol_halt() {
 }
 
 # twovol_answer LOG LINE — what the machine answered the command LINE: the
-# lines after its echo up to the next prompt.
+# lines after its echo up to the next prompt. The echo is on the prompt's
+# line, or on a line of its own when a kernel line came after the prompt — a
+# stick pulled says so on the console while the prompt waits.
 twovol_answer() {
     tr -d '\r' <"$1" | awk -v cmd="$2" '
         found && /~ / { exit }
         found { print }
-        index($0, "~ " cmd) && substr($0, length($0) - length(cmd) + 1) == cmd { found = 1 }'
+        $0 == cmd || (index($0, "~ " cmd) && substr($0, length($0) - length(cmd) + 1) == cmd) { found = 1 }'
 }
 
 # twovol_said LOG PATTERN WHAT — the log says PATTERN (grep -E).
@@ -89,6 +91,7 @@ run_twovolumes() {
        type_line "files kind:note" && wait_for_prompt &&
        type_line "files kind:note on 1" && wait_for_prompt &&
        type_line "files kind:note on Holiday photos" && wait_for_prompt &&
+       type_line "disks Holiday photos" && wait_for_prompt &&
        mon_raw "device_del usbstick" &&
        wait_for_line build/serial.log 'volume 1: the medium the volume lives on has left' "$WAIT_QUIET_S" &&
        type_line "delete them" && wait_for_prompt &&
@@ -122,6 +125,9 @@ run_twovolumes() {
     twovol_answer "$L" "files kind:note on Holiday photos" | grep -q "^twovol.note.txt " &&
         twovol_answer "$L" "files kind:note on Holiday photos" | grep -q "^On Holiday photos:"
     chk $? "twovolumes: and narrowed to it by its name"
+    twovol_answer "$L" "disks Holiday photos" | grep -q "^Disk [0-9]" &&
+        twovol_answer "$L" "disks Holiday photos" | grep -q "volume 1, Holiday photos"
+    chk $? "twovolumes: the stick's disk named by the name of the volume on it"
     twovol_said "$L" 'volume 1: the medium the volume lives on has left — its book is held open' \
         "the stick pulled, its book is held open, the volume named"
     twovol_answer "$L" "delete them" | grep -q "^delete: it lies on Holiday photos, which is not plugged in — plug it in"
