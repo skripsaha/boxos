@@ -409,15 +409,13 @@ int BoardroomFlush(uint8_t seat);
  * when it recognises its own volume there, filling `out_uuid` with whatever
  * that volume calls itself.
  *
- * When more than one seat answers, the identity decides. The loader read this
- * kernel out of one particular volume and wrote down which one, so the seat
- * whose volume matches the Boarding Pass is the seat this machine booted from
- * — not a resemblance, the same sixteen bytes.
- *
- * Only when there is no pass, or nothing on the bus matches it, does the old
- * rule apply: the removable medium wins, because a machine that boots from a
- * stick while carrying an old volume on an internal disk should not quietly
- * mount the wrong decade. That rule is a guess, and it is printed as one.
+ * Which volume is wanted is the caller's to say, and its probe says it: a
+ * probe that wants one volume — by the sixteen bytes it calls itself —
+ * recognises that one alone. Only a probe that recognises more than one, which
+ * asked for no volume in particular, meets the room's rule: the removable
+ * medium wins, because a machine that boots from a stick while carrying an old
+ * volume on an internal disk should not quietly mount the wrong decade. That
+ * rule is a guess, and it is printed as one.
  *
  * `out_uuid` — optional — is filled with what the chosen seat's volume calls
  * itself. This is not a convenience: the room has ALREADY been told that

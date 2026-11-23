@@ -274,17 +274,22 @@ const void *DeedStamp(const DeedCopy *copy, uint16_t kind, uint16_t *out_bytes)
     return NULL;
 }
 
+void DeedUuidText(const uint8_t uuid[16], char out[33])
+{
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        out[i * 2]     = hex[(uuid[i] >> 4) & 0xF];
+        out[i * 2 + 1] = hex[uuid[i] & 0xF];
+    }
+    out[32] = '\0';
+}
+
 void DeedDescribe(uint8_t seat, const DeedCopy *copy)
 {
     if (!copy) return;
 
     char text[33];
-    static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < 16; i++) {
-        text[i * 2]     = hex[(copy->head.uuid[i] >> 4) & 0xF];
-        text[i * 2 + 1] = hex[copy->head.uuid[i] & 0xF];
-    }
-    text[32] = '\0';
+    DeedUuidText(copy->head.uuid, text);
 
     kprintf("[Deed] seat %u: volume %s, %llu sectors, far copy at %llu\n",
             seat, text, (unsigned long long)copy->head.sectors,

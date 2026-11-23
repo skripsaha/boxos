@@ -111,6 +111,10 @@ void DeedRelease(DeedCopy *copy);
  */
 const void *DeedStamp(const DeedCopy *copy, uint16_t kind, uint16_t *out_bytes);
 
+/* The sixteen bytes a volume calls itself, as 32 hex digits and a NUL —
+ * printed whole: two volumes made the same day differ in the middle. */
+void DeedUuidText(const uint8_t uuid[16], char out[33]);
+
 /* Say what a Deed holds, in the log. Used when a volume is first met. */
 void DeedDescribe(uint8_t seat, const DeedCopy *copy);
 

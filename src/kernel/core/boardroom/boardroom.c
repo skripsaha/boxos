@@ -1,7 +1,6 @@
 #include "boardroom.h"
 #include "ground.h"
 #include "touch.h"
-#include "boarding.h"
 #include "klib.h"
 #include "ahci.h"
 #include "ahci_sync.h"
@@ -1525,14 +1524,8 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
         return BOARDROOM_NO_SEAT;
     }
 
-    /* What the loader said, if it said anything. Read once: the answer cannot
-     * change while the room is being called to order. */
-    uint8_t  want[16];
-    bool     have_pass = BoardingPassVolume(want);
-
     uint8_t  chosen      = BOARDROOM_NO_SEAT;
     uint8_t  chosen_uuid[16];
-    uint8_t  by_identity = BOARDROOM_NO_SEAT;
     unsigned found       = 0;
 
     /*
@@ -1577,19 +1570,14 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
             board_say_volume(s->number, uuid);
         }
 
-        if (have_pass && memcmp(uuid, want, 16) == 0 &&
-            by_identity == BOARDROOM_NO_SEAT) {
-            by_identity = s->number;
-        }
-
         if (chosen == BOARDROOM_NO_SEAT) {
             chosen = s->number;
             memcpy(chosen_uuid, uuid, 16);
             continue;
         }
 
-        /* The fallback, for when nothing on the bus is the volume named on the
-         * pass — or there is no pass. */
+        /* The rule, for a probe that recognises more than one: it asked for
+         * no volume in particular. */
         BoardSeat* c = seat_taken(chosen);
         if (c && !c->removable && s->removable) {
             chosen = s->number;
@@ -1597,66 +1585,7 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
         }
     }
 
-    /*
-     * The pass wins when it can be honoured.
-     *
-     * Not "when there is more than one candidate": a single volume that is not
-     * the one this kernel came out of is still the wrong volume, and finding
-     * only one of something is not evidence that it is the right one.
-     */
-    bool by_rule = true;
-    if (by_identity != BOARDROOM_NO_SEAT) {
-        chosen  = by_identity;
-        /* It was chosen BECAUSE it matched, so the pass's sixteen bytes are
-         * that seat's identity — there is nothing else it could be. */
-        memcpy(chosen_uuid, want, 16);
-        by_rule = false;
-    }
-
     if (found == 0) {
-        return BOARDROOM_NO_SEAT;
-    }
-
-    if (!by_rule) {
-        kprintf("[Boardroom] seat %u carries the volume this kernel was read "
-                "out of — the loader said so on its boarding pass\n", chosen);
-        if (out_uuid) {
-            memcpy(out_uuid, chosen_uuid, 16);
-        }
-        return chosen;
-    }
-
-    /*
-     * The pass names a volume and the room is not carrying it. Nothing is
-     * handed over.
-     *
-     * This used to fall through to the rule below and give back somebody
-     * else's volume — and it did so having just printed, in as many words,
-     * that the volume it was looking for was not there. It had the exact
-     * sixteen bytes it wanted, knew they were absent, and guessed anyway.
-     *
-     * What made that expensive is what happens next: the mount succeeds, so
-     * nothing is ever wrong enough to retry, and when the real medium finishes
-     * enumerating half a second later it is ignored for the rest of the boot.
-     * Measured — a machine booted from a stick mounted its own old internal
-     * disk instead, silently, and went on to run programs out of it.
-     *
-     * So the question stops being "has the bus finished?", which nothing can
-     * answer except a clock, and becomes "has THAT volume arrived?", which the
-     * volume itself answers exactly. Until it does, this machine has no
-     * filesystem, which is the truth. Re-seating the medium is what a person
-     * does about it, and re-seating produces the arrival that ends the wait.
-     */
-    if (have_pass) {
-        char text[33];
-        uuid_text(want, text);
-        kprintf("[Boardroom] the loader came from the volume %s, and no seat "
-                "is carrying it\n", text);
-        /* found is at least one here — found == 0 returned above — so there is
-         * always somebody else's volume being declined. */
-        kprintf("[Boardroom] %u volume(s) are here and none of them is this "
-                "machine's — mounting nothing, and waiting for the medium to "
-                "arrive\n", found);
         return BOARDROOM_NO_SEAT;
     }
     if (found > 1) {

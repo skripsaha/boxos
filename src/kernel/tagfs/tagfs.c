@@ -234,9 +234,11 @@ static void search_met_unread(uint8_t *unread, uint8_t seat)
  * Which volume `vol` stands for. Once it has stood on one, that one and no
  * other: a volume of the house is its UUID, in whichever seat (volume/house.c).
  * Before that — the home volume, never yet mounted — the one the loader read
- * this kernel out of, as the boarding pass names it, preferred and not
- * required: with that one nowhere, the home volume stands on the first it can
- * read. *strict says which; false when there is nothing to want either way.
+ * this kernel out of, as the boarding pass names it, and no other either: a
+ * machine booted from a stick that mounts its old internal disk instead, when
+ * the stick is slower to arrive, runs programs out of the wrong decade. Only a
+ * machine with no pass stands on the first volume it can read. False when
+ * there is nothing to want; *strict then false, else true.
  */
 static bool volume_wants(TagFSVolume* vol, uint8_t want[16], bool* strict)
 {
@@ -245,8 +247,8 @@ static bool volume_wants(TagFSVolume* vol, uint8_t want[16], bool* strict)
         *strict = true;
         return true;
     }
-    *strict = false;
-    return BoardingPassVolume(want);
+    *strict = BoardingPassVolume(want);
+    return *strict;
 }
 
 /*
@@ -328,6 +330,32 @@ static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
 
 uint64_t tagfs_get_volume_base(TagFSVolume* vol) { return vol->mount.base; }
 
+/*
+ * The volume wanted is on no seat, said as what it is. The one the loader
+ * came from is waited for, the other volumes the room carries declined: until
+ * it arrives this machine has no volume of its own, which is the truth, and
+ * re-seating the medium is what a person does about it — the arrival that
+ * ends the wait. Counted only here, where nothing was found.
+ */
+static void volume_not_found(TagFSVolume* vol, bool by_pass)
+{
+    uint32_t others = 0;
+    for (uint8_t seat = 0; seat < BoardroomSeatCount(); seat++)
+        if (BoardroomSeatOccupied(seat) && volume_recognised(vol, seat, NULL, true))
+            others++;
+    if (by_pass && others) {
+        uint8_t want[16];
+        char    text[33];
+        BoardingPassVolume(want);
+        DeedUuidText(want, text);
+        kprintf("[TagFS] the loader came from the volume %s, and no seat is carrying it\n", text);
+        kprintf("[TagFS] %u volume(s) are here and none of them is this machine's — mounting nothing, "
+                "and waiting for the medium to arrive\n", others);
+        return;
+    }
+    kprintf("[TagFS] no volume found on any of the %u seated medium(s)\n", BoardroomSeatCount());
+}
+
 static void TagFSProbeDrive(TagFSVolume* vol)
 {
     /*
@@ -346,14 +374,17 @@ static void TagFSProbeDrive(TagFSVolume* vol)
      * return for the rest of the boot.
      */
     uint8_t uuid[16];
+    bool    by_pass = !vol->mount.uuid_known && BoardingPassVolume(uuid);
     vol->mount.search_unread = BOARDROOM_NO_SEAT;
     vol->mount.seat = BoardroomFindVolume(tagfs_recognise, vol, uuid);
 
     if (vol->mount.seat == BOARDROOM_NO_SEAT) {
-        kprintf("[TagFS] no volume found on any of the %u seated medium(s)\n",
-                BoardroomSeatCount());
+        volume_not_found(vol, by_pass);
         return;
     }
+    if (by_pass)
+        kprintf("[TagFS] seat %u carries the volume this kernel was read out of — the loader said so on "
+                "its boarding pass\n", vol->mount.seat);
 
     memcpy(vol->mount.uuid, uuid, 16);
     vol->mount.uuid_known = true;
@@ -652,16 +683,11 @@ static error_t volume_take_ground(TagFSVolume* vol, uint8_t seat)
  */
 static void volume_would_not_flush(TagFSVolume* vol, error_t why)
 {
-    static const char hex[] = "0123456789abcdef";
     char uuid[33];
     const char* text = "a volume that has not said its name";
 
     if (vol->mount.uuid_known) {
-        for (int i = 0; i < 16; i++) {
-            uuid[i * 2]     = hex[(vol->mount.uuid[i] >> 4) & 0xF];
-            uuid[i * 2 + 1] = hex[vol->mount.uuid[i] & 0xF];
-        }
-        uuid[32] = '\0';
+        DeedUuidText(vol->mount.uuid, uuid);
         text = uuid;
     }
     /* The buffer is sized for the one thing it holds — 32 hex digits and a
@@ -1639,8 +1665,8 @@ error_t tagfs_init(TagFSVolume* vol) {
         return ground_rc;
     }
 
-    // --- Test Framework init ---
-    if (TagFS_TestsInit() != OK) {
+    // --- Test Framework init: the tests run on the home volume's mount ---
+    if (vol == TagFSHome() && TagFS_TestsInit() != OK) {
         return mount_refused(vol, "its test framework would not start",
                              ERR_NO_MEMORY);
     }
@@ -1870,7 +1896,8 @@ static void tagfs_clear_the_ground(TagFSVolume* vol)
     IntegrityRotEnd(vol);
     MountBookLetGo(vol);
     TagFSUnderGlass(vol, NULL);
-    TagFS_TestsShutdown();
+    if (vol == TagFSHome())
+        TagFS_TestsShutdown();
 
     memset(vol->state.uuid, 0, sizeof(vol->state.uuid));
     memset(vol->state.volume_name, 0, sizeof(vol->state.volume_name));
