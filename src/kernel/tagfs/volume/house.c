@@ -100,6 +100,23 @@ void TagFSHouseBegin(void)
 }
 
 /*
+ * A volume met on `seat` at `base` that calls itself what volume `known` does
+ * while `known` stands elsewhere: a copy — a medium written from another
+ * block for block. Two volumes of one name are one too many: the copy is not
+ * taken in, and said once a search, as what it is.
+ */
+static void HouseSeesCopy(TagFSVolume* known, uint8_t seat, uint64_t base)
+{
+    if (!known->state.initialized || (known->mount.seat == seat && known->mount.base == base))
+        return;
+    char text[33];
+    DeedUuidText(known->mount.uuid, text);
+    kprintf("[TagFS] seat %u carries a copy of volume %u of the house (%s, standing on seat %u) — the "
+            "same volume twice is not taken in; the copy is left as it is\n",
+            seat, known->number, text, known->mount.seat);
+}
+
+/*
  * Every BoxOS volume on every seated medium the house does not hold yet: taken
  * in, its arrival owed — its own service pass mounts it. The home volume
  * first: until it stands on a volume of its own, any volume met is the one it
@@ -133,8 +150,11 @@ static void HouseSurvey(void)
             uint8_t uuid[16];
             memcpy(uuid, head.head.uuid, 16);
             DeedRelease(&head);
-            if (TagFSVolumeOfUuid(uuid))
+            TagFSVolume* known = TagFSVolumeOfUuid(uuid);
+            if (known) {
+                HouseSeesCopy(known, seat, ground[g].start_sector);
                 continue;
+            }
 
             TagFSVolume* vol = TagFSVolumeTakeIn(uuid);
             if (!vol) {
