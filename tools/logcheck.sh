@@ -137,6 +137,8 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_mkfs.sh"
 # The block4096 scenario: tools/logcheck_block.sh.
 . "$(dirname "$0")/logcheck_block.sh"
+# The twovolumes scenario: tools/logcheck_volumes.sh.
+. "$(dirname "$0")/logcheck_volumes.sh"
 # The book's census and the stand's road on a book: tools/logcheck_book.sh,
 # its USB road tools/logcheck_book_usb.sh, the book the kernel writes read back
 # by both readers tools/logcheck_book_circle.sh; the kernel's Tallies of a book:
@@ -10440,6 +10442,7 @@ case "${1:-both}" in
     dedup)    run_dedup ;;
     mkfs)     run_mkfs ;;
     block4096) run_block4096 ;;
+    twovolumes) run_twovolumes ;;
     uefi)     run_uefi ;;
     footing)  run_footing ;;
     stranger) run_stranger ;;

@@ -116,10 +116,10 @@ bool AwayDeedSame(TagFSVolume* vol, const DeedCopy* head)
 void AwayLeft(TagFSVolume* vol, bool swapped)
 {
     __atomic_add_fetch(&vol->away.departures, 1u, __ATOMIC_ACQ_REL);
-    kprintf("[TagFS] the medium the volume lives on has %s — its book is held open: %llu "
+    kprintf("[TagFS] volume %u: the medium the volume lives on has %s — its book is held open: %llu "
             "change(s) no cycle settled, and everyone waiting on them, wait for the same volume "
             "to come back as it was left; every read and write of it is refused until then\n",
-            swapped ? "been replaced by another one in the same seat" : "left",
+            TagFSVolumeNumber(vol), swapped ? "been replaced by another one in the same seat" : "left",
             (unsigned long long)AwayUnsettled(vol));
 }
 
@@ -134,11 +134,12 @@ static void AwayBookTakenUp(TagFSVolume* vol, uint8_t seat)
         ksnprintf(last, sizeof(last), "its last stitch, seq %llu, where it was sewn", (unsigned long long)p->last);
     else
         ksnprintf(last, sizeof(last), "no stitch of it past its newest slot, which stands for every one");
-    kprintf("[TagFS] the volume is back, in seat %u: %s — its book as this kernel left it: %s and nothing another "
+    kprintf("[TagFS] volume %u: the volume is back, in seat %u: %s — its book as this kernel left it: %s and nothing another "
             "writer laid past it, its newest slot seq %llu, and %llu block(s) of data no stitch settled read back as "
             "written. Its book is taken up: %llu change(s) no cycle settled go to the medium with the next cycle, "
             "none lost%s\n",
-            seat, BoardroomSeatName(seat), last, (unsigned long long)p->slot, (unsigned long long)p->proved,
+            TagFSVolumeNumber(vol), seat, BoardroomSeatName(seat), last, (unsigned long long)p->slot,
+            (unsigned long long)p->proved,
             (unsigned long long)AwayUnsettled(vol),
             p->tried ? "; its own stitch cut short lies past the last, and the next goes on past it (M-6)" : "");
     ErrataAsk(vol);
@@ -161,26 +162,27 @@ uint64_t AwayGiveUp(TagFSVolume* vol, AwayVerdict why, uint8_t seat)
     AwayRemember(vol, lied);
     switch (why) {
     case AWAY_NOT_LANDED:
-        kprintf("[TagFS] the volume came back in seat %u as this kernel left its book, but %llu of the %llu block(s) "
+        kprintf("[TagFS] volume %u: the volume came back in seat %u as this kernel left its book, but %llu of the %llu block(s) "
                 "of data no stitch settled do not read back as written — a medium's cache goes with its power, "
-                "whatever a flush said (ERR_TAGFS_NOT_LANDED to everyone waiting)" AWAY_LOST, seat,
+                "whatever a flush said (ERR_TAGFS_NOT_LANDED to everyone waiting)" AWAY_LOST, TagFSVolumeNumber(vol), seat,
                 (unsigned long long)PerambulationLast(vol)->missed, (unsigned long long)PerambulationLast(vol)->proved,
                 (unsigned long long)lost);
         break;
     case AWAY_OTHER:
-        kprintf("[TagFS] the volume came back in seat %u not as this kernel left its book: %s%s" AWAY_LOST, seat,
+        kprintf("[TagFS] volume %u: the volume came back in seat %u not as this kernel left its book: %s%s" AWAY_LOST,
+                TagFSVolumeNumber(vol), seat,
                 PerambulationLast(vol)->why,
                 lied ? " — gone, nothing another writer's in its place, though a flush the medium said it kept "
                        "covered it: the medium lied, and its book carries MEDIUM_LIED from its next mount on" : "",
                 (unsigned long long)lost);
         break;
     case AWAY_SEAT_TAKEN:
-        kprintf("[TagFS] another volume sits in seat %u, where the book of the volume that left "
-                "it was held" AWAY_LOST, seat, (unsigned long long)lost);
+        kprintf("[TagFS] volume %u: another volume sits in seat %u, where the book of the volume that left "
+                "it was held" AWAY_LOST, TagFSVolumeNumber(vol), seat, (unsigned long long)lost);
         break;
     case AWAY_HALT:
-        kprintf("[TagFS] the machine is stopping while the volume's medium is away" AWAY_LOST,
-                (unsigned long long)lost);
+        kprintf("[TagFS] volume %u: the machine is stopping while the volume's medium is away" AWAY_LOST,
+                TagFSVolumeNumber(vol), (unsigned long long)lost);
         break;
     default:
         /* A book as it was left is taken up (AwayTakeUp), never given up: a
