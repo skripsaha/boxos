@@ -300,6 +300,20 @@ _Static_assert(sizeof(VolumeFrame) == 24, "VolumeFrame is 24 bytes on the medium
 /* The ring as a maker of this format lays it down (above). */
 #define VOLUME_FRAME_SPINE_SLOTS  3u
 
+/* The FRAME every maker of this format lays — the host's volume maker and the
+ * kernel's alike — on ground aligned to `grain` blocks: the Deed's grain, a
+ * grain to each Spine slot, and the data run from the grain after the last of
+ * them. */
+static inline VolumeFrame VolumeFrameLaid(uint32_t grain)
+{
+    VolumeFrame f;
+    f.spine_block  = grain;
+    f.spine_stride = grain;
+    f.spine_slots  = VOLUME_FRAME_SPINE_SLOTS;
+    f.data_block   = (uint64_t)grain * (1u + VOLUME_FRAME_SPINE_SLOTS);
+    return f;
+}
+
 /*
  * Does a FRAME hold — the one rule every reader of one keeps: the kernel at
  * its format check (tagfs/deed/deed.c, DeedFormatRefused), the UEFI loader

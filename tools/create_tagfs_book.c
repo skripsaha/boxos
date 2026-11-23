@@ -1,13 +1,13 @@
 /*
  * create_tagfs_book.c — the volume maker's writer: the volume, its files in a
- * row and its book bound over them (the binder is create_tagfs_bind.c);
+ * row and its book bound over them (the binder is book_bind.c, the kernel's too);
  * --ground, how far its ground must run; and --frame-only, a Deed over files
  * in a row and no book — a stand.
  */
 
 #include <unistd.h>           /* fsync: the order the medium takes the writes in */
 
-#include "create_tagfs_bind.h"
+#include "create_tagfs.h"
 #include "volume_digest.h"   /* the digest of a block, bit for bit the kernel's */
 
 /* ====================================================================
@@ -103,14 +103,7 @@ static int FrameOnlyPlace(FileInfo* files, int file_count, char* argv[], int fir
 /* The FRAME every volume this tool makes is laid out by: the Deed's grain, a
  * grain to each Spine slot, the data run from the grain after. */
 static VolumeFrame FrameLaid(void) {
-    const uint32_t grain = GROUND_GRAIN_SECTORS / TAGFS_BLOCK_SECTORS;
-    VolumeFrame frame;
-    memset(&frame, 0, sizeof(frame));
-    frame.spine_block  = grain;
-    frame.spine_stride = grain;
-    frame.spine_slots  = VOLUME_FRAME_SPINE_SLOTS;
-    frame.data_block   = (uint64_t)grain * (1u + VOLUME_FRAME_SPINE_SLOTS);
-    return frame;
+    return VolumeFrameLaid(GROUND_GRAIN_SECTORS / TAGFS_BLOCK_SECTORS);
 }
 
 int FrameOnlyMake(const char* disk_path, int file_count, char* argv[], int first) {
@@ -497,6 +490,11 @@ static int BindingWriteData(Binding* v) {
     return 0;
 }
 
+/* The binder's blocks into the image, at the volume's block `block`. */
+static int BindingSink(void* ctx, uint64_t block, const void* data, uint64_t bytes) {
+    return write_at_sector((FILE*)ctx, block * TAGFS_BLOCK_SECTORS, data, bytes);
+}
+
 /* The book — the Tally's nodes in both copies, then slot 0 naming them — on
  * the medium with the files, and only then the Deed at both ends, on the
  * medium in its turn: a volume cut short anywhere before has no Deed at all
@@ -507,10 +505,20 @@ static int BindingWriteBook(Binding* v, char* argv[], int first) {
     const SpineCounts counts = { (uint64_t)v->count + 1u, g_tag_count, 1 };
     VolumeBoot        boot;
     memset(&boot, 0, sizeof(boot));
-    if (BindTally(v->disk, &v->plan, v->uuid, FIRST_TALLY_SEQ) != 0 ||
-        BindSpine(v->disk, &v->plan, v->frame.spine_block, v->leaves.grain, v->uuid, &head, &counts,
-                  FIRST_SLOT_SEQ) != 0)
+    const BindSink    sink   = { BindingSink, v->disk };
+    uint64_t          failed = 0;
+    int               rc     = BindTally(&sink, &v->plan, v->uuid, FIRST_TALLY_SEQ, &failed);
+    if (rc == BIND_OK)
+        rc = BindSpine(&sink, &v->plan, v->frame.spine_block, v->leaves.grain, v->uuid, &head, &counts,
+                       FIRST_SLOT_SEQ, &failed);
+    if (rc == BIND_NO_MEMORY) {
+        fprintf(stderr, "No memory to seal the book's nodes\n");
         return -1;
+    }
+    if (rc != BIND_OK) {
+        fprintf(stderr, "Failed to write the book's block %llu\n", (unsigned long long)failed);
+        return -1;
+    }
     if (v->kernel >= 0) {
         boot.kernel_block  = (uint32_t)v->files[v->kernel].start;
         boot.kernel_blocks = (uint32_t)v->files[v->kernel].blocks;
@@ -576,8 +584,16 @@ static int BindingLay(Binding* v, char* argv[], int first, uint64_t data_end, in
         WySeedLanes(v->uuid, sizeof(v->uuid), lanes);
         v->lane = lanes[0];
     }
-    return BindingDigests(v, read) == 0 && BindingLeaves(v) == 0 && QuireLay(&v->leaves, v->end, data_end, &v->plan) == 0
-           ? 0 : -1;
+    if (BindingDigests(v, read) != 0 || BindingLeaves(v) != 0) return -1;
+    int rc = QuireLay(&v->leaves, v->end, data_end, &v->plan);
+    if (rc == BIND_NO_MEMORY)
+        fprintf(stderr, "No memory to lay the book's Tally out\n");
+    else if (rc == BIND_NO_ROOM)
+        fprintf(stderr, "The book does not fit the data run: its Tally-Quires from block %llu, its ribbon "
+                        "and next_quire run to block %llu, past the data run's end at block %llu\n",
+                (unsigned long long)v->plan.a, (unsigned long long)(v->plan.next + v->leaves.grain),
+                (unsigned long long)data_end);
+    return rc == BIND_OK ? 0 : -1;
 }
 
 int BookMake(const char* disk_path, int file_count, char* argv[], int first) {

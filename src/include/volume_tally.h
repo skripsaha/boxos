@@ -14,7 +14,7 @@
  * u64's: every number is a varint.
  *
  * ‼ ONE CODEC FOR EVERY WRITER AND READER OF THEM. mkfs writes the first Tally
- * of every volume with this (tools/create_tagfs_bind.c), the kernel reads and
+ * of every volume with this (src/lib/book/book_bind.c), the kernel reads and
  * binds every Tally after it with this, and volume-read on the host says the
  * same again by its own code (tools/volumeread/tally.py). The kernel's book
  * suite (book_tests.c) holds this codec to the sums below on every boot that

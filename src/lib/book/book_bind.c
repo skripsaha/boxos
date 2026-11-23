@@ -1,7 +1,8 @@
 /*
- * create_tagfs_bind.c — the book bound: the first Tally of a volume in
- * both its Tally-Quires, slot 0 of its Spine naming it, and the ribbon's two
- * Quires blank for the first stitch a kernel will sew.
+ * book_bind.c — the book bound: the first Tally of a volume in both its
+ * Tally-Quires, slot 0 of its Spine naming it, and the ribbon's two Quires
+ * blank for the first stitch a kernel will sew (book_bind.h). The host's
+ * volume maker and the kernel's bind with it.
  *
  * ‼ THE SAME BINDER AS volume-read's, SAID AGAIN IN C. tools/volumeread/
  * binder.py lays a Tally by one rule, and so does this, step for step —
@@ -24,12 +25,38 @@
  *   - A the first grain at or past the end of the files, k grains each — the
  *     least k all the nodes fit in, found again whenever the pointers k
  *     moves grow an inner node; the ribbon's Quire and its next_quire the two
- *     grains past B — refused aloud when they run past the data run.
+ *     grains past B — refused when they run past the data run.
  * Every node of a Tally is written in both copies (§2.5), and an empty tree
  * is not written at all: a volume given no name has no USE (§1.4).
  */
 
-#include "create_tagfs_bind.h"
+#if __STDC_HOSTED__
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#define BookAlloc(n)       malloc(n)
+#define BookRealloc(p, n)  realloc((p), (n))
+#define BookFree(p)        free(p)
+#else
+#include "ktypes.h"
+#include "klib.h"
+#define BookAlloc(n)       kmalloc(n)
+#define BookRealloc(p, n)  krealloc((p), (n))
+#define BookFree(p)        kfree(p)
+#endif
+#include "volume_deed.h"
+#include "book_bind.h"
+
+/* Room for `n` things of `size`, zeroed — the heap of either side has no
+ * calloc of its own in common. */
+static void* BookZalloc(uint64_t n, uint64_t size)
+{
+    uint64_t bytes = n * size;
+    void*    p     = BookAlloc(bytes ? bytes : 1u);
+    if (p)
+        memset(p, 0, bytes);
+    return p;
+}
 
 /* ====================================================================
  *  The leaves
@@ -39,12 +66,12 @@
 uint8_t* BindBody(BindLeaves* l, uint64_t bytes) {
     if (l->nbodies == l->bodies_room) {
         uint32_t  room  = l->bodies_room ? l->bodies_room * 2u : 64u;
-        uint8_t** grown = realloc(l->bodies, room * sizeof(*grown));
+        uint8_t** grown = BookRealloc(l->bodies, room * sizeof(*grown));
         if (!grown) return NULL;
         l->bodies      = grown;
         l->bodies_room = room;
     }
-    uint8_t* body = malloc(bytes ? bytes : 1u);
+    uint8_t* body = BookAlloc(bytes ? bytes : 1u);
     if (body) l->bodies[l->nbodies++] = body;
     return body;
 }
@@ -55,7 +82,7 @@ int BindAdd(BindLeaves* l, uint32_t tree, TallyKey key, const uint8_t* body, uin
             uint64_t count) {
     if (l->count[tree] == l->room[tree]) {
         uint32_t  room  = l->room[tree] ? l->room[tree] * 2u : 64u;
-        BindItem* grown = realloc(l->items[tree], room * sizeof(*grown));
+        BindItem* grown = BookRealloc(l->items[tree], room * sizeof(*grown));
         if (!grown) return -1;
         l->items[tree] = grown;
         l->room[tree]  = room;
@@ -65,9 +92,9 @@ int BindAdd(BindLeaves* l, uint32_t tree, TallyKey key, const uint8_t* body, uin
 }
 
 void BindLeavesFree(BindLeaves* l) {
-    for (uint32_t i = 0; i < l->nbodies; i++) free(l->bodies[i]);
-    free(l->bodies);
-    for (uint32_t t = 0; t <= TALLY_SHARED; t++) free(l->items[t]);
+    for (uint32_t i = 0; i < l->nbodies; i++) BookFree(l->bodies[i]);
+    BookFree(l->bodies);
+    for (uint32_t t = 0; t <= TALLY_SHARED; t++) BookFree(l->items[t]);
     memset(l, 0, sizeof(*l));
 }
 
@@ -134,7 +161,7 @@ static uint32_t BindHeadBytes(uint32_t tree, uint32_t level, uint64_t items, Tal
  */
 static int BindPack(uint32_t tree, uint32_t level, const BindItem* items, uint32_t n, BindCut** cuts,
                     uint32_t* ncuts) {
-    BindCut* out = malloc(sizeof(*out) * (n ? n : 1u));
+    BindCut* out = BookAlloc(sizeof(*out) * (n ? n : 1u));
     uint32_t m = 0, cur = 0;
     BindCut  c = { 0, 0, 0, 0 };
     TallyKey first = { 0, 0 };
@@ -178,7 +205,7 @@ static int BindNodeMake(BindPlan* plan, uint32_t tree, uint32_t level, const Bin
                         const BindCut* cut, uint64_t off) {
     if (plan->nnodes == plan->room) {
         uint32_t  room  = plan->room ? plan->room * 2u : 64u;
-        BindNode* grown = realloc(plan->nodes, room * sizeof(*grown));
+        BindNode* grown = BookRealloc(plan->nodes, room * sizeof(*grown));
         if (!grown) return -1;
         plan->nodes = grown;
         plan->room  = room;
@@ -188,11 +215,11 @@ static int BindNodeMake(BindPlan* plan, uint32_t tree, uint32_t level, const Bin
     BindNode* node   = &plan->nodes[plan->nnodes];
     *node = (BindNode){ .tree = tree, .level = level, .count = cut->count, .sheets = sheets, .off = off,
                         .first = items[cut->from].key };
-    node->stream = calloc(sheets, TALLY_SHEET_PAYLOAD);
-    node->starts = malloc(sizeof(uint32_t) * (cut->n + 1u));
+    node->stream = BookZalloc(sheets, TALLY_SHEET_PAYLOAD);
+    node->starts = BookAlloc(sizeof(uint32_t) * (cut->n + 1u));
     if (!node->stream || !node->starts) {
-        free(node->stream);
-        free(node->starts);
+        BookFree(node->stream);
+        BookFree(node->starts);
         return -1;
     }
     NodeHead h   = { .tree = tree, .level = level, .items = cut->n, .first = node->first };
@@ -215,8 +242,8 @@ static int BindNodeMake(BindPlan* plan, uint32_t tree, uint32_t level, const Bin
 static int BindInner(const BindPlan* plan, uint32_t first, uint32_t n, uint64_t a, uint64_t b, uint64_t seq,
                      BindItem** items, uint8_t** bodies) {
     enum { INNER_MOST = 10u + 10u * (3u + 2u) };    /* count, and a pointer of two copies */
-    *items  = malloc(sizeof(BindItem) * n);
-    *bodies = malloc((size_t)INNER_MOST * n);
+    *items  = BookAlloc(sizeof(BindItem) * n);
+    *bodies = BookAlloc((size_t)INNER_MOST * n);
     if (!*items || !*bodies) return -1;
     for (uint32_t j = 0; j < n; j++) {
         const BindNode* node   = &plan->nodes[first + j];
@@ -249,14 +276,14 @@ static int BindTree(const BindLeaves* l, uint32_t tree, uint64_t a, uint64_t b, 
         for (uint32_t i = 0; i < ncuts; i++) {
             *off = (*off + l->grid - 1u) / l->grid * l->grid;
             if (BindNodeMake(plan, tree, level, items, &cuts[i], *off) != 0) {
-                free(cuts);
+                BookFree(cuts);
                 goto out;
             }
             *off += plan->nodes[plan->nnodes - 1u].sheets;
         }
-        free(cuts);
-        free(inner);        /* the level below's elements are in its nodes' streams now */
-        free(bodies);
+        BookFree(cuts);
+        BookFree(inner);        /* the level below's elements are in its nodes' streams now */
+        BookFree(bodies);
         inner  = NULL;
         bodies = NULL;
         if (ncuts == 1) {
@@ -269,17 +296,17 @@ static int BindTree(const BindLeaves* l, uint32_t tree, uint64_t a, uint64_t b, 
         n     = ncuts;
     }
 out:
-    free(inner);
-    free(bodies);
+    BookFree(inner);
+    BookFree(bodies);
     return rc;
 }
 
 void BindPlanFree(BindPlan* plan) {
     for (uint32_t i = 0; i < plan->nnodes; i++) {
-        free(plan->nodes[i].stream);
-        free(plan->nodes[i].starts);
+        BookFree(plan->nodes[i].stream);
+        BookFree(plan->nodes[i].starts);
     }
-    free(plan->nodes);
+    BookFree(plan->nodes);
     memset(plan, 0, sizeof(*plan));
 }
 
@@ -305,17 +332,14 @@ static int BindLayAt(const BindLeaves* l, uint64_t a, uint64_t b, BindPlan* plan
  * least number of grains the nodes take. The pointers of the inner nodes
  * name blocks of A and B, so a k that grows can grow a node in turn: laid
  * again until k holds still (it only grows, and the nodes are finite). The
- * ribbon's Quire and its next_quire are the two grains past B. Refused,
- * saying so, when next_quire runs past `data_end` — the block of the far
- * Deed. 0, or -1 having said why.
+ * ribbon's Quire and its next_quire are the two grains past B. BIND_NO_ROOM
+ * when next_quire runs past `data_end` — the block of the far Deed.
  */
 int QuireLay(const BindLeaves* l, uint64_t after, uint64_t data_end, BindPlan* plan) {
     uint64_t grain = l->grain, a = (after + grain - 1u) / grain * grain, grains = 1, used;
     for (;;) {
-        if (BindLayAt(l, a, a + grains * grain, plan, &used) != 0) {
-            fprintf(stderr, "No memory to lay the book's Tally out\n");
-            return -1;
-        }
+        if (BindLayAt(l, a, a + grains * grain, plan, &used) != 0)
+            return BIND_NO_MEMORY;
         if (used <= grains * grain) break;
         grains = (used + grain - 1u) / grain;
         BindPlanFree(plan);
@@ -326,14 +350,13 @@ int QuireLay(const BindLeaves* l, uint64_t after, uint64_t data_end, BindPlan* p
     plan->ribbon = plan->b + grains * grain;
     plan->next   = plan->ribbon + grain;
     if (plan->next + grain > data_end) {
-        fprintf(stderr, "The book does not fit the data run: its Tally-Quires from block %llu, its ribbon "
-                        "and next_quire run to block %llu, past the data run's end at block %llu\n",
-                (unsigned long long)a, (unsigned long long)(plan->next + grain),
-                (unsigned long long)data_end);
+        uint64_t next = plan->next;
         BindPlanFree(plan);
-        return -1;
+        plan->a    = a;
+        plan->next = next;
+        return BIND_NO_ROOM;
     }
-    return 0;
+    return BIND_OK;
 }
 
 /* ====================================================================
@@ -341,31 +364,29 @@ int QuireLay(const BindLeaves* l, uint64_t after, uint64_t data_end, BindPlan* p
  * ==================================================================== */
 
 /* Every node of the plan sealed at `seq` and written in both copies — the
- * sectors of each copy sealed at their own addresses (§2.5). 0, or -1 having
- * said why. */
-int BindTally(FILE* disk, const BindPlan* plan, const uint8_t uuid[16], uint64_t seq) {
+ * sectors of each copy sealed at their own addresses (§2.5). */
+int BindTally(const BindSink* sink, const BindPlan* plan, const uint8_t uuid[16], uint64_t seq,
+              uint64_t* failed) {
     for (uint32_t i = 0; i < plan->nnodes; i++) {
         const BindNode* node  = &plan->nodes[i];
-        uint64_t        bytes = node->sheets * TAGFS_BLOCK_SIZE;
-        uint8_t*        unit  = malloc(bytes);
+        uint64_t        bytes = node->sheets * VOLUME_BLOCK_BYTES;
+        uint8_t*        unit  = BookAlloc(bytes);
         const uint64_t  at[2] = { plan->a + node->off, plan->b + node->off };
-        if (!unit) {
-            fprintf(stderr, "No memory to seal the Tally's nodes\n");
-            return -1;
-        }
+        if (!unit)
+            return BIND_NO_MEMORY;
         for (uint32_t c = 0; c < 2u; c++) {
-            uint64_t vlba = at[c] * TAGFS_BLOCK_SECTORS;
+            uint64_t vlba = at[c] * VOLUME_BLOCK_SECTORS;
             TallyUnitSeal(unit, node->stream, node->len, node->starts, node->nstarts, BOOK_UNIT_SHEET, seq,
-                          vlba, (uint32_t)(node->sheets * TAGFS_BLOCK_SECTORS), uuid);
-            if (write_at_sector(disk, vlba, unit, bytes) != 0) {
-                fprintf(stderr, "Failed to write the Tally's node at block %llu\n", (unsigned long long)at[c]);
-                free(unit);
-                return -1;
+                          vlba, (uint32_t)(node->sheets * VOLUME_BLOCK_SECTORS), uuid);
+            if (sink->write(sink->ctx, at[c], unit, bytes) != 0) {
+                *failed = at[c];
+                BookFree(unit);
+                return BIND_REFUSED;
             }
         }
-        free(unit);
+        BookFree(unit);
     }
-    return 0;
+    return BIND_OK;
 }
 
 /*
@@ -374,17 +395,22 @@ int BindTally(FILE* disk, const BindPlan* plan, const uint8_t uuid[16], uint64_t
  * copies, at the Tally's seq — SpineRibbon (the ribbon from its Quire's first
  * block, its next_quire after it) and `counts`; no SpineFlags, no flag being
  * set. And the ribbon's two Quires blank: the first stitch a kernel sews
- * begins at the first of them (§16.3 п.5). 0, or -1 having said why.
+ * begins at the first of them (§16.3 п.5).
  */
-int BindSpine(FILE* disk, const BindPlan* plan, uint64_t slot_block, uint64_t grain,
+int BindSpine(const BindSink* sink, const BindPlan* plan, uint64_t slot_block, uint64_t grain,
               const uint8_t uuid[16], const SpineHead* head, const SpineCounts* counts,
-              uint64_t slot_seq) {
-    static uint8_t        stream[TALLY_SHEET_PAYLOAD], unit[TAGFS_BLOCK_SIZE];
-    static const uint8_t  blank[TAGFS_BLOCK_SIZE];
+              uint64_t slot_seq, uint64_t* failed) {
+    uint8_t*              stream = BookZalloc(1, TALLY_SHEET_PAYLOAD);
+    uint8_t*              unit   = BookZalloc(1, VOLUME_BLOCK_BYTES);
+    uint8_t*              blank  = BookZalloc(1, VOLUME_BLOCK_BYTES);
     uint32_t              starts[TALLY_SHARED + 4u], n = 0, at = 0;
     const SpineRibbon     ribbon = { plan->ribbon, plan->ribbon, grain, plan->next, grain };
 
-    memset(stream, 0, sizeof(stream));
+    int                   rc     = BIND_OK;
+    if (!stream || !unit || !blank) {
+        rc = BIND_NO_MEMORY;
+        goto out;
+    }
     starts[n++] = at;
     at += SpineHeadPut(stream + at, head);
     for (uint32_t tree = TALLY_FILES; tree <= TALLY_SHARED; tree++) {
@@ -400,17 +426,23 @@ int BindSpine(FILE* disk, const BindPlan* plan, uint64_t slot_block, uint64_t gr
     at += SpineRibbonPut(stream + at, &ribbon);
     starts[n++] = at;
     at += SpineCountsPut(stream + at, counts);
-    TallyUnitSeal(unit, stream, at, starts, n, BOOK_UNIT_SLOT, slot_seq, slot_block * TAGFS_BLOCK_SECTORS,
-                  TAGFS_BLOCK_SECTORS, uuid);
-    if (write_at_sector(disk, slot_block * TAGFS_BLOCK_SECTORS, unit, sizeof(unit)) != 0) {
-        fprintf(stderr, "Failed to write slot 0 of the Spine at block %llu\n", (unsigned long long)slot_block);
-        return -1;
+    TallyUnitSeal(unit, stream, at, starts, n, BOOK_UNIT_SLOT, slot_seq, slot_block * VOLUME_BLOCK_SECTORS,
+                  VOLUME_BLOCK_SECTORS, uuid);
+    if (sink->write(sink->ctx, slot_block, unit, VOLUME_BLOCK_BYTES) != 0) {
+        *failed = slot_block;
+        rc      = BIND_REFUSED;
+        goto out;
     }
     for (uint64_t b = plan->ribbon; b < plan->next + grain; b++) {
-        if (write_at_sector(disk, b * TAGFS_BLOCK_SECTORS, blank, sizeof(blank)) != 0) {
-            fprintf(stderr, "Failed to blank the ribbon's block %llu\n", (unsigned long long)b);
-            return -1;
+        if (sink->write(sink->ctx, b, blank, VOLUME_BLOCK_BYTES) != 0) {
+            *failed = b;
+            rc      = BIND_REFUSED;
+            goto out;
         }
     }
-    return 0;
+out:
+    BookFree(stream);
+    BookFree(unit);
+    BookFree(blank);
+    return rc;
 }

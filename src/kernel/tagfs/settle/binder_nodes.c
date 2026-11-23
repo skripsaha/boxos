@@ -9,7 +9,7 @@
  * laid at A and B, among the nodes it names as they lie.
  *
  * ‼ ONE RULE OF PACKING, THREE WRITERS (§16.1 п.7, §16.2 п.24, §16.3 пп.1, 5).
- * mkfs (tools/create_tagfs_bind.c) and volume-read (tools/volumeread/
+ * mkfs (src/lib/book/book_bind.c) and volume-read (tools/volumeread/
  * binder.py) lay a Tally by the same steps, and volume-read binds this one
  * again where it lies and holds it byte for byte (binder.Circle):
  *   - a file is its header and its Parcels — memory's Parcels, one to one,

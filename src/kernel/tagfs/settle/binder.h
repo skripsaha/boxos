@@ -24,7 +24,7 @@
  *                   naming either Tally
  *   binder_nodes.c  the nodes: the elements of each tree in key order, packed
  *                   by the one rule every writer of a Tally keeps — the same as
- *                   mkfs's (tools/create_tagfs_bind.c) and volume-read's
+ *                   mkfs's (src/lib/book/book_bind.c) and volume-read's
  *                   (tools/volumeread/binder.py) — and laid at A and B
  *   binder_items.c  the elements of each tree, as they come out of memory
  *   births.c        the seq that put each run of this mount's writing in, for

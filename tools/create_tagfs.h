@@ -5,8 +5,8 @@
  * and the I/O on it (create_tagfs_ground.c), the files and the tags they are
  * packed with (create_tagfs_cargo.c), and the writer (create_tagfs_book.c) —
  * --frame-only, a Deed with no book behind it, and the volume with its book
- * bound by create_tagfs_bind.c (create_tagfs_bind.h). What the parts share is
- * named here, once.
+ * bound by the binder every maker of a volume binds with (book_bind.h). What
+ * the parts share is named here, once.
  */
 
 #ifndef CREATE_TAGFS_H
@@ -21,6 +21,7 @@
 #include "volume_deed.h"     /* the title; types come from <stdint.h> above    */
 #include "deed_pen.h"        /* and the one pen it is written with              */
 #include "volume_tally.h"    /* TALLY_FILE_ROLE_*, the role a file is kept in    */
+#include "book_bind.h"       /* the binder, the kernel's own as well             */
 
 #define TAGFS_BLOCK_SIZE       VOLUME_BLOCK_BYTES
 #define TAGFS_SECTOR_BYTES     VOLUME_DEED_SECTOR_BYTES
@@ -63,6 +64,24 @@ typedef struct {
     uint32_t    tag_count;
     uint32_t    role;        /* TALLY_FILE_ROLE_*: what the system keeps it as; 0 for an ordinary file */
 } FileInfo;
+
+/* A file as the book lays it: the cargo's account of it and its one run —
+ * blocks counted in u64, for the ground has no width. An empty file has no
+ * run: a header alone (§2.9). */
+typedef struct {
+    const char* path;
+    const char* name;          /* its base name, the name it is listed by */
+    uint64_t    fid;
+    uint64_t    size;
+    uint64_t    start;         /* in the volume's blocks */
+    uint64_t    blocks;
+    uint32_t*   tags;          /* rising */
+    uint32_t    ntags;
+    uint32_t    role;          /* TALLY_FILE_ROLE_*: what the system keeps it as, 0 for none */
+    uint8_t     head[TALLY_HEAD_MOST];   /* its first bytes, head_len of them: min(size, TALLY_HEAD_MOST) */
+    uint32_t    head_len;
+    uint64_t    passport;      /* the signed program it is, 0 for none (PassportOf) */
+} BindFile;
 
 /* ====================================================================
  * The ground (create_tagfs_ground.c)

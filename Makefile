@@ -1120,8 +1120,8 @@ TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os.$(UNAME_S).$(UNAME_M)
 # ($(filter %.c,$^)): a .c that is not here is not in the tool either, and the
 # link says so instead of a stale part going on writing.
 $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tagfs_cargo.c \
-               tools/create_tagfs_book.c tools/create_tagfs_bind.c \
-               tools/create_tagfs.h tools/create_tagfs_bind.h \
+               tools/create_tagfs_book.c $(SRCDIR)/lib/book/book_bind.c \
+               tools/create_tagfs.h $(SRCDIR)/include/book_bind.h \
                $(SRCDIR)/include/tagfs_reserved.h \
                $(SRCDIR)/include/volume_deed.h \
                $(SRCDIR)/include/volume_book.h $(SRCDIR)/include/volume_tally.h \
