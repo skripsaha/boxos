@@ -291,7 +291,8 @@ bool Run(Bookmark &Mark, Telling &Tell)
             Tell.Said("the disk " + Mark.Wanted.DiskName + " is not there any more");
             return false;
         }
-        if (Mark.Next == Step::Esp && !Mark.Wanted.GuidKnown && Disk->Table == DISK_TABLE_GPT) {
+        if (Mark.Next != Step::Begin && Mark.Next != Step::Table && !Mark.Wanted.GuidKnown &&
+            Disk->Table == DISK_TABLE_GPT) {
             Mark.Wanted.GuidKnown = true;   /* a table laid: the disk is known by its GUID from here */
             std::memcpy(Mark.Wanted.DiskGuid.data(), Disk->Guid, 16);
         }

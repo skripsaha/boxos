@@ -74,7 +74,7 @@ UTILS = create show files tag untag name trash delete assemble \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple flappybird chess \
         edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
-        glyphs drawcheck itemcheck benchmark volumes carry disks
+        glyphs drawcheck itemcheck benchmark volumes carry disks install
 
 .PHONY: all clean
 
@@ -545,6 +545,16 @@ $(addprefix $(CHESS_DIR)/,position.o engine.o): CXXFLAGS += -O2
 
 chess.elf: $(BOXLIB_START) $(CHESS_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(CHESS_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# Install is C++ in parts of its own directory; it keeps its bookmark with keep.o.
+INSTALL_DIR  = install
+INSTALL_OBJS = $(addprefix $(INSTALL_DIR)/,install.o facts.o plan.o steps.o bookmark.o asking.o) keep.o
+
+$(INSTALL_OBJS): CXXFLAGS += -I.
+
+install.elf: $(BOXLIB_START) $(INSTALL_OBJS) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(INSTALL_OBJS) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
 
 # Hangman is C++ in parts of its own directory; it keeps its ledger with keep.o.
 HANGMAN_DIR  = hangman
