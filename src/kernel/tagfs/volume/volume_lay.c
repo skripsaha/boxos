@@ -471,18 +471,24 @@ error_t VolumeLayBegin(VolumeLaying* l)
 }
 
 /* The house took the volume in and mounted it: the answer. A volume the
- * house will not mount is said. */
+ * house will not mount is said. What is still coming — looked for, taken in,
+ * owed a mount, or being mounted now — is read before whether it is mounted,
+ * and the house's look before whether it took the volume in: a mount
+ * that ends between the two is seen as coming, and the next pass finds it
+ * mounted, never as one the house would not mount. */
 static void VolumeLayTaken(VolumeLaying* l)
 {
-    TagFSVolume* vol = TagFSVolumeOfUuid(l->uuid);
+    bool         looking = TagFSHouseLooking();
+    TagFSVolume* vol     = TagFSVolumeOfUuid(l->uuid);
+    bool         coming  = vol ? __atomic_load_n(&vol->mount.arrival_owed, __ATOMIC_ACQUIRE) ||
+                                 __atomic_load_n(&vol->mount.mount_owed, __ATOMIC_ACQUIRE) ||
+                                 __atomic_load_n(&vol->mount.attending, __ATOMIC_ACQUIRE)
+                               : looking;
     if (vol && TagFSVolumeMounted(vol)) {
         l->number = TagFSVolumeNumber(vol);
         VolumeLayEnd(l, OK);
         return;
     }
-    bool coming = vol ? __atomic_load_n(&vol->mount.arrival_owed, __ATOMIC_ACQUIRE) ||
-                        __atomic_load_n(&vol->mount.mount_owed, __ATOMIC_ACQUIRE)
-                      : TagFSHouseLooking();
     if (!coming) {
         kprintf("[TagFS] the house did not %s the volume laid on seat %u\n", vol ? "mount" : "take in", l->seat);
         VolumeLayEnd(l, ERR_TAGFS_NOT_INITIALIZED);
