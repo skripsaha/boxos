@@ -282,6 +282,16 @@ int disk_boot(const DiskListed *disk, uint16_t entry, uint32_t volume, bool firs
     return rc;
 }
 
+int disk_unboot(const DiskListed *disk, uint16_t entry, DiskUnbooted *unbooted)
+{
+    uint8_t answer[4] = { 0 };
+    int     rc        = disk_changed(HW_DISK_UNBOOT, disk, &entry, sizeof(entry), answer, sizeof(answer));
+    if (rc == 0 && unbooted)
+        *unbooted = (DiskUnbooted){ .Options = answer[0], .Loader = answer[1] != 0, .Fallback = answer[2] != 0,
+                                    .Bios = answer[3] != 0 };
+    return rc;
+}
+
 int disk_grow(const DiskListed *disk, uint16_t entry, uint64_t blocks, uint64_t *grown)
 {
     uint8_t  more[10];

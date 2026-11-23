@@ -26,6 +26,10 @@
 #include "disk_table.h"
 #include "disk_look.h"
 
+/* The loader BoxOS puts on an ESP is a few hundred KiB; one past this is no
+ * loader of this system's. */
+#define DISKS_LOADER_MOST  (16u << 20)
+
 /* The most volumes of the house one disk is asked about: a table names at most
  * this many BoxOS partitions anybody stands on before the rest are counted. */
 #define DISKS_VOLUMES_MOST 32u
@@ -253,6 +257,49 @@ int HwDiskAdd(const ManifestOp* op, Crate* crates, uint16_t crate_count, const O
     return rc;
 }
 
+/* The BIOS loader the home volume keeps under `name`, read whole into *out
+ * (the caller's to kfree); NULL when it keeps none. */
+static uint8_t* DisksKept(const char* name, uint32_t most, uint32_t* bytes)
+{
+    uint8_t* bytes_read = NULL;
+    *bytes = 0;
+    return TagFSKeptRead(TagFSHome(), name, most, &bytes_read, bytes) == OK ? bytes_read : NULL;
+}
+
+/*
+ * Whether the partition in `entry` of the disk, of another kind than BoxOS's,
+ * is BoxOS's own to take away: an ESP holding nothing of any system — no
+ * loader's directory, no default (DiskLookAt) — or a BIOS boot partition
+ * whose head is BoxOS's second stage, as the home volume keeps it. Another
+ * system's ESP or GRUB's second stage is never BoxOS's.
+ */
+static bool DisksOwned(uint8_t seat, uint32_t seating, uint16_t entry)
+{
+    DiskTable t;
+    if (DiskTableRead(seat, &t) != OK)
+        return false;
+    bool owned = false;
+    for (uint32_t i = 0; t.seating == seating && i < t.part_count; i++) {
+        if (t.parts[i].entry != entry)
+            continue;
+        if (t.parts[i].kind == DISK_PART_ESP) {
+            DiskLook look;
+            DiskLookAt(&t, i, &look);
+            owned = (look.holds == DISK_HOLDS_FAT || look.holds == DISK_HOLDS_EMPTY) && !look.loaders_len &&
+                    !(look.flags & (DISK_PART_DEFAULT_LOADER | DISK_PART_MORE_LOADERS));
+        } else if (t.parts[i].kind == DISK_PART_BIOS_BOOT && t.block_bytes == BIOS_SECTOR_BYTES) {
+            uint32_t bytes  = 0;
+            uint8_t* stage2 = DisksKept(BIOS_STAGE2_KEPT, DISKS_LOADER_MOST, &bytes);
+            uint8_t  head[BIOS_SECTOR_BYTES];
+            owned = stage2 && bytes >= BIOS_SECTOR_BYTES &&
+                    BoardroomRead(seat, t.parts[i].first, 1, head) == 0 && memcmp(head, stage2, sizeof(head)) == 0;
+            kfree(stage2);
+        }
+    }
+    DiskTableLetGo(&t);
+    return owned;
+}
+
 /* HW_DISK_REMOVE  params: [u8 seat][u32 seating][u16 entry] */
 int HwDiskRemove(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx)
 {
@@ -266,7 +313,7 @@ int HwDiskRemove(const ManifestOp* op, Crate* crates, uint16_t crate_count, cons
         return rc;
     uint16_t entry;
     memcpy(&entry, op->params + 5, 2);
-    return (int)DiskTableRemove(seat, seating, entry, &used);
+    return (int)DiskTableRemove(seat, seating, entry, &used, DisksOwned(seat, seating, entry));
 }
 
 /* HW_DISK_GROW  params: [u8 seat][u32 seating][u16 entry][u64 blocks];
@@ -291,9 +338,6 @@ int HwDiskGrow(const ManifestOp* op, Crate* crates, uint16_t crate_count, const 
     return rc;
 }
 
-/* The loader BoxOS puts on an ESP is a few hundred KiB; one past this is no
- * loader of this system's. */
-#define DISKS_LOADER_MOST  (16u << 20)
 
 /* HW_DISK_BOOT  params: [u8 seat][u32 seating][u16 entry][u32 volume][u8 first];
  * out_crate (optional): [u16 option][u8 option given][u8 default written] */
@@ -350,6 +394,34 @@ int HwDiskBoot(const ManifestOp* op, Crate* crates, uint16_t crate_count, const 
     kfree(stage2);
     if (rc == OK && op->out_crate != CRATE_INDEX_NONE) {
         uint8_t answer[5] = { (uint8_t)said.number, (uint8_t)(said.number >> 8), said.option, said.fallback, said.bios };
+        if (crate_write(&crates[op->out_crate], ctx, answer, sizeof(answer)) != OK)
+            return ERR_INVALID_ADDRESS;
+    }
+    return rc;
+}
+
+/* HW_DISK_UNBOOT  params: [u8 seat][u32 seating][u16 entry]; out_crate
+ * (optional): [u8 options taken away][u8 directory][u8 default][u8 boot code] */
+int HwDiskUnboot(const ManifestOp* op, Crate* crates, uint16_t crate_count, const OpContext* ctx)
+{
+    (void)crate_count;
+    uint8_t       seat;
+    uint32_t      seating;
+    DisksStanding standing;
+    DiskInUse     used;
+    int           rc = DisksAsked(op, 2, ctx, &seat, &seating, &standing, &used);
+    if (rc != OK)
+        return rc;
+    DiskUnbootAsk a = { .seat = seat, .seating = seating };
+    memcpy(&a.entry, op->params + 5, 2);
+    uint8_t* stage1 = DisksKept(BIOS_STAGE1_KEPT, BIOS_SECTOR_BYTES, &a.stage1_bytes);
+    a.stage1        = stage1;
+    DiskUnbootSaid said;
+    rc = (int)DiskBootTakeAway(&a, &said);
+    kfree(stage1);
+    if (rc == OK && op->out_crate != CRATE_INDEX_NONE) {
+        uint8_t answer[4] = { (uint8_t)(said.options > 255u ? 255u : said.options), said.loader, said.fallback,
+                              said.bios };
         if (crate_write(&crates[op->out_crate], ctx, answer, sizeof(answer)) != OK)
             return ERR_INVALID_ADDRESS;
     }

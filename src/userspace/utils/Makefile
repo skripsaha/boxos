@@ -548,7 +548,7 @@ chess.elf: $(BOXLIB_START) $(CHESS_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXL
 
 # Install is C++ in parts of its own directory; it keeps its bookmark with keep.o.
 INSTALL_DIR  = install
-INSTALL_OBJS = $(addprefix $(INSTALL_DIR)/,install.o facts.o plan.o steps.o bookmark.o asking.o) keep.o
+INSTALL_OBJS = $(addprefix $(INSTALL_DIR)/,install.o facts.o plan.o steps.o bookmark.o asking.o remove.o) keep.o
 
 $(INSTALL_OBJS): CXXFLAGS += -I.
 

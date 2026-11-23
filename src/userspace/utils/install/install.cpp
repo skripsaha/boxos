@@ -15,6 +15,8 @@
  *   called NAME           the new volume's name: the rest of the line
  * A whole disk is always signed for by its name typed, however much was said.
  *
+ *   install remove Zenbook SSD     BoxOS taken off that disk again (remove.cpp)
+ *
  * An installation cut part way — the power, the stick — keeps a bookmark on the
  * volume install runs from: started again, install says where it stopped and
  * goes on from there.
@@ -27,7 +29,7 @@
 #include "box/form.h"
 #include "box/print.h"
 
-BOX_FORM("takes optional text \"a disk's name or number, then whole or beside, fresh or mine, without tags, first or last, called a name\"\n");
+BOX_FORM("takes optional text \"a disk's name or number, then whole or beside, fresh or mine, without tags, first or last, called a name; or remove and a disk\"\n");
 
 namespace {
 
@@ -184,7 +186,7 @@ int main(void)
         exit(1);
         return 1;
     }
-    int Status = Installed(Line);
+    int Status = std::strncmp(Line, "remove ", 7) == 0 ? Remove(Line + 7) : Installed(Line);
     exit(Status);
     return Status;
 }

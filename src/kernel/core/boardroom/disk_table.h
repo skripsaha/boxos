@@ -125,11 +125,13 @@ error_t DiskTableLay(uint8_t seat, uint32_t seating, const DiskInUse* used);
 error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t first, uint64_t blocks,
                      uint16_t* entry);
 
-/* BoxOS's partition in `entry` taken away, its run free. ERR_OUT_OF_RANGE
+/* BoxOS's partition in `entry` taken away, its run free — or, `owned`, one of
+ * another kind its caller judged BoxOS's own: an ESP holding nothing of any
+ * system, a BIOS boot partition holding BoxOS's second stage. ERR_OUT_OF_RANGE
  * for no partition there; ERR_INVALID_ARGUMENT for one of another kind;
  * ERR_BUSY for one a volume of the house stands on; ERR_INVALID_STATE and
  * ERR_CORRUPTED as DiskTableAdd's. */
-error_t DiskTableRemove(uint8_t seat, uint32_t seating, uint16_t entry, const DiskInUse* used);
+error_t DiskTableRemove(uint8_t seat, uint32_t seating, uint16_t entry, const DiskInUse* used, bool owned);
 
 /* BoxOS's partition in `entry` grown into the room right after it — up to the
  * next partition, or the last block the table may use — to `blocks` long, or

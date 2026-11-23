@@ -12,6 +12,7 @@
  *   bookmark.cpp  where an installation stopped, kept on the volume install
  *                 runs from, so a cut — the power, the stick — is gone on with
  *   asking.cpp    the person asked and told in the hub, a step at a time
+ *   remove.cpp    BoxOS taken off a disk again, what is anyone else's kept
  *   install.cpp   the words of the line, and the whole of it in order
  *
  * The kernel does every change by the person's hands (box/disk.h): a table, a
@@ -179,6 +180,12 @@ bool Run(Bookmark &Mark, Telling &Tell);
 std::optional<Bookmark> BookmarkRead();
 /* Kept, or — Next being Done — let go. False with the refusal in Why. */
 bool BookmarkWrite(const Bookmark &Mark, std::string &Why);
+
+/* ---- remove.cpp ---------------------------------------------------------- */
+
+/* BoxOS taken off the disk the words name, signed for by its name: 0, or 1
+ * with the refusal said. */
+int Remove(const char *Words);
 
 /* ---- common -------------------------------------------------------------- */
 

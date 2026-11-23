@@ -16,6 +16,7 @@
 #define BOOT_NAME_MOST       512u      /* a variable's name the walk takes, in CHAR16 */
 #define BOOT_OPTION_MOST     4096u     /* an option's bytes the walk reads */
 #define BOOT_NUMBERS         0x10000u
+#define BOOT_NUMBERS_TAKEN_MOST 64u    /* options naming one file taken away in one call */
 
 static void Put16(uint8_t* p, uint32_t v)
 {
@@ -232,5 +233,112 @@ error_t EfiBootOptionPut(const char* description, const EfiPartition* part, cons
     }
     kfree(opt);
     kfree(used);
+    return rc;
+}
+
+/* The numbers of every Boot#### that names `list` into `numbers` (room for
+ * `most`): how many, or -1 when the firmware would not be walked. */
+static int32_t OptionsNaming(const uint8_t* list, uint32_t list_bytes, uint16_t* numbers, uint32_t most)
+{
+    uint16_t* name  = kmalloc(BOOT_NAME_MOST * sizeof(uint16_t));
+    uint8_t*  opt   = kmalloc(BOOT_OPTION_MOST);
+    EfiGuid   vendor;
+    int32_t   found = name && opt ? 0 : -1;
+    if (found == 0) {
+        name[0] = 0;
+        memset(&vendor, 0, sizeof(vendor));
+    }
+    while (found >= 0) {
+        uint64_t  size = BOOT_NAME_MOST * sizeof(uint16_t);
+        EfiStatus s    = efi_get_next_variable_name(&size, name, &vendor);
+        if (s == EFI_STATUS_NOT_FOUND)
+            break;
+        if (s != EFI_STATUS_SUCCESS) {
+            found = -1;
+            break;
+        }
+        int32_t n = BootNumber(name);
+        if (n < 0 || memcmp(&vendor, &EFI_GLOBAL_VARIABLE_GUID, sizeof(EfiGuid)) != 0)
+            continue;
+        uint64_t bytes = BOOT_OPTION_MOST;
+        uint32_t attrs = 0;
+        if (efi_get_variable(name, &EFI_GLOBAL_VARIABLE_GUID, &attrs, &bytes, opt) == EFI_STATUS_SUCCESS &&
+            OptionNames(opt, bytes, list, list_bytes) && (uint32_t)found < most)
+            numbers[found++] = (uint16_t)n;
+    }
+    kfree(name);
+    kfree(opt);
+    return found;
+}
+
+/* `numbers` (`count` of them) taken out of BootOrder; an order left empty
+ * deleted. */
+static error_t OrderTakeAway(const uint16_t* numbers, uint32_t count)
+{
+    uint64_t  bytes = 0;
+    uint32_t  attrs = 0;
+    EfiStatus s     = efi_get_variable_ascii("BootOrder", &EFI_GLOBAL_VARIABLE_GUID, &attrs, &bytes, NULL);
+    if (s != EFI_STATUS_BUFFER_TOO_SMALL)
+        return OK;          /* no order: nothing to take out of it */
+    uint16_t* order = kmalloc(bytes + 2u);
+    if (!order)
+        return ERR_NO_MEMORY;
+    s = efi_get_variable_ascii("BootOrder", &EFI_GLOBAL_VARIABLE_GUID, &attrs, &bytes, order);
+    uint64_t kept = 0;
+    for (uint64_t i = 0; s == EFI_STATUS_SUCCESS && i < bytes / 2u; i++) {
+        bool gone = false;
+        for (uint32_t k = 0; k < count; k++)
+            gone |= order[i] == numbers[k];
+        if (!gone)
+            order[kept++] = order[i];
+    }
+    if (s == EFI_STATUS_SUCCESS)
+        s = efi_set_variable_ascii("BootOrder", &EFI_GLOBAL_VARIABLE_GUID, kept ? BOOT_VARIABLE_ATTRS : 0,
+                                   kept * sizeof(uint16_t), kept ? order : NULL);
+    kfree(order);
+    if (s != EFI_STATUS_SUCCESS) {
+        kprintf("[EFI] the firmware refused BootOrder (status 0x%llx)\n", (unsigned long long)s);
+        return ERR_WRITE_FAILED;
+    }
+    return OK;
+}
+
+error_t EfiBootOptionsTakeAway(const EfiPartition* part, const char* path, uint32_t* removed)
+{
+    if (removed)
+        *removed = 0;
+    if (!efi_runtime_available())
+        return ERR_UNSUPPORTED;
+    uint32_t  list_bytes = PathListPut(NULL, part, path);
+    uint8_t*  list       = kmalloc(list_bytes);
+    uint16_t* numbers    = kmalloc(BOOT_NUMBERS_TAKEN_MOST * sizeof(uint16_t));
+    if (!list || !numbers) {
+        kfree(list);
+        kfree(numbers);
+        return ERR_NO_MEMORY;
+    }
+    PathListPut(list, part, path);
+    int32_t found = OptionsNaming(list, list_bytes, numbers, BOOT_NUMBERS_TAKEN_MOST);
+    error_t rc    = found < 0 ? ERR_WRITE_FAILED : OK;
+    if (found < 0)
+        kprintf("[EFI] the firmware's variables would not be walked — no boot option taken away\n");
+    static const char hex[] = "0123456789ABCDEF";
+    for (int32_t i = 0; rc == OK && i < found; i++) {
+        char      name[9] = { 'B', 'o', 'o', 't', hex[numbers[i] >> 12 & 15], hex[numbers[i] >> 8 & 15],
+                              hex[numbers[i] >> 4 & 15], hex[numbers[i] & 15], 0 };
+        EfiStatus s       = efi_set_variable_ascii(name, &EFI_GLOBAL_VARIABLE_GUID, 0, 0, NULL);
+        if (s != EFI_STATUS_SUCCESS) {
+            kprintf("[EFI] the firmware refused to let %s go (status 0x%llx)\n", name, (unsigned long long)s);
+            rc = ERR_WRITE_FAILED;
+        } else {
+            kprintf("[EFI] %s, which named %s on GPT partition %u, is taken away\n", name, path, part->number);
+        }
+    }
+    if (rc == OK && found > 0)
+        rc = OrderTakeAway(numbers, (uint32_t)found);
+    if (rc == OK && removed)
+        *removed = (uint32_t)found;
+    kfree(list);
+    kfree(numbers);
     return rc;
 }

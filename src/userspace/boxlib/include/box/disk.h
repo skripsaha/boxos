@@ -118,6 +118,22 @@ typedef struct {
  * with no room. */
 int disk_boot(const DiskListed *disk, uint16_t entry, uint32_t volume, bool first, DiskBooted *booted);
 
+/* What making a disk start BoxOS no more did (disk_unboot). */
+typedef struct {
+    uint8_t Options;        /* boot options of the firmware taken away */
+    bool    Loader;         /* BoxOS's directory taken off the ESP */
+    bool    Fallback;       /* the ESP's default taken away: it was BoxOS's loader */
+    bool    Bios;           /* BoxOS's code taken off the boot sector */
+} DiskUnbooted;
+
+/* BoxOS made to start from the ESP in `entry` of `disk` no more, by the
+ * person's hands (change-disks): BoxOS's files taken off the ESP — its
+ * default when it is BoxOS's loader — every boot option of the firmware
+ * naming BoxOS's loader there, and BoxOS's code off the boot sector; another
+ * system's never touched. 0, and what was done in *unbooted (NULL for none);
+ * or a negative -error_t as disk_boot's. */
+int disk_unboot(const DiskListed *disk, uint16_t entry, DiskUnbooted *unbooted);
+
 /* BoxOS's partition in `entry` grown into the room right after it, to
  * `blocks` long or all of that room for 0; its length now in *grown (NULL for
  * none). A volume standing on it takes the ground at its next mount.

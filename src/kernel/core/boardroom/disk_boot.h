@@ -49,4 +49,29 @@ typedef struct {
  */
 error_t DiskBootLay(const DiskBootAsk* a, DiskBootSaid* said);
 
+/*
+ * BoxOS made to start from that disk no more — what removing BoxOS from a disk
+ * begins with: every file under BoxOS's own directory on the ESP in `entry`
+ * taken away and the directory with them; the ESP's removable-media default
+ * taken away when it is BoxOS's own loader, byte for byte; every boot option
+ * of the firmware naming BoxOS's loader there; and the boot sector's code,
+ * when it is BoxOS's — `stage1`, the volume's — taken off sector 0, the table
+ * kept. Another system's loader, default or code is never touched.
+ */
+typedef struct {
+    uint8_t        seat;
+    uint32_t       seating;
+    uint16_t       entry;           /* the ESP */
+    const uint8_t* stage1;          /* BoxOS's boot sector, to know its code by; NULL for none */
+    uint32_t       stage1_bytes;
+} DiskUnbootAsk;
+typedef struct {
+    uint32_t options;               /* boot options taken away */
+    bool     loader;                /* BoxOS's directory taken away */
+    bool     fallback;              /* the default taken away: it was BoxOS's */
+    bool     bios;                  /* BoxOS's code taken off sector 0 */
+} DiskUnbootSaid;
+/* OK, and what was done in *said; the refusals DiskBootLay's. */
+error_t DiskBootTakeAway(const DiskUnbootAsk* a, DiskUnbootSaid* said);
+
 #endif /* BOARDROOM_DISK_BOOT_H */

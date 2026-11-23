@@ -866,6 +866,7 @@ error_t HardwareDeckRegister(void)
         { HW_DISK_MEND,          HwDiskMend,         OP_AUTH_APP,    "hw.disk.mend"     },
         { HW_DISK_GROW,          HwDiskGrow,         OP_AUTH_APP,    "hw.disk.grow"     },
         { HW_DISK_BOOT,          HwDiskBoot,         OP_AUTH_APP,    "hw.disk.boot"     },
+        { HW_DISK_UNBOOT,        HwDiskUnboot,       OP_AUTH_APP,    "hw.disk.unboot"   },
         /* Screen: the glass is lent to the system program that draws. */
         { HW_SCREEN_CLAIM,       HwScreenClaim,      OP_AUTH_SYSTEM, "hw.screen.claim"  },
         { HW_SCREEN_RELEASE,     HwScreenRelease,    OP_AUTH_SYSTEM, "hw.screen.release"},

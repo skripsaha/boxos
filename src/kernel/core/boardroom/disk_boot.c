@@ -291,3 +291,153 @@ error_t DiskBootLay(const DiskBootAsk* a, DiskBootSaid* said)
     said->option = rc == OK;
     return rc;
 }
+
+/* The names under one directory, for taking them away one by one. */
+typedef struct {
+    char     names[16][FAT_NAME_MOST + 1];
+    uint32_t count;
+    bool     more;
+} DirNames;
+
+static int DirNamed(void* ctx, const char* name, const FatEntry* e)
+{
+    (void)e;
+    DirNames* d = ctx;
+    if (name[0] == '.')
+        return 0;
+    if (d->count == sizeof(d->names) / sizeof(d->names[0])) {
+        d->more = true;
+        return 0;
+    }
+    size_t n = strnlen(name, FAT_NAME_MOST);
+    memcpy(d->names[d->count], name, n);
+    d->names[d->count++][n] = 0;
+    return 0;
+}
+
+/* Whether the files `a` and `b` of `v` hold the same bytes. */
+static bool FatSameFiles(FatVolume* v, const FatEntry* a, const FatEntry* b)
+{
+    if (a->size != b->size || a->size > 16u << 20)
+        return false;
+    uint8_t* x = kmalloc(a->size ? a->size : 1u);
+    uint8_t* y = kmalloc(b->size ? b->size : 1u);
+    bool     same = x && y && FatRead(v, a, 0, x, a->size) == (int64_t)a->size &&
+                FatRead(v, b, 0, y, b->size) == (int64_t)b->size && memcmp(x, y, a->size) == 0;
+    kfree(x);
+    kfree(y);
+    return same;
+}
+
+/* BoxOS's files taken off the ESP `part`: its default first, when it is
+ * BoxOS's loader, then its own directory whole. */
+static int EspCleared(const DiskUnbootAsk* a, const DiskPart* part, uint32_t block_bytes, DiskUnbootSaid* said)
+{
+    DiskFatPlace place;
+    FatVolume*   v = kmalloc(sizeof(FatVolume));
+    DirNames*    d = kmalloc(sizeof(DirNames));
+    if (!v || !d) {
+        kfree(v);
+        kfree(d);
+        return FAT_IO;
+    }
+    memset(d, 0, sizeof(*d));
+    DiskFatPlaced(&place, a->seat, a->seating, part->first, part->last - part->first + 1u, block_bytes);
+    FatEntry loader, fallback;
+    int      rc = FatOpen(v, &place.medium);
+    if (rc == FAT_OK) {
+        FatStamp(v, rtc_get_unix64());
+        if (FatFind(v, ESP_LOADER, &loader) == FAT_OK && FatFind(v, ESP_FALLBACK, &fallback) == FAT_OK &&
+            FatSameFiles(v, &loader, &fallback)) {
+            rc             = FatRemove(v, ESP_FALLBACK);
+            said->fallback = rc == FAT_OK;
+            char fallback_dir[32] = "EFI/";
+            PathPartOf(ESP_FALLBACK, 1, fallback_dir + 4, sizeof(fallback_dir) - 4);
+            int  dir_gone = rc == FAT_OK ? FatRemove(v, fallback_dir) : rc;
+            if (dir_gone != FAT_OK && dir_gone != FAT_NOT_DIRECTORY)
+                rc = dir_gone;      /* another file keeping the directory keeps it */
+        }
+    }
+    if (rc == FAT_OK) {
+        int listed = FatEach(v, ESP_DIR, DirNamed, d);
+        if (listed == FAT_NOT_FOUND) {
+            rc = FAT_OK;
+        } else {
+            rc = listed;
+            for (uint32_t i = 0; rc == FAT_OK && i < d->count; i++) {
+                char path[sizeof(ESP_DIR) + FAT_NAME_MOST + 2];
+                ksnprintf(path, sizeof(path), "%s/%s", ESP_DIR, d->names[i]);
+                rc = FatRemove(v, path);
+            }
+            if (rc == FAT_OK && !d->more) {
+                rc           = FatRemove(v, ESP_DIR);
+                said->loader = rc == FAT_OK;
+            }
+        }
+    }
+    kfree(v);
+    kfree(d);
+    return rc;
+}
+
+error_t DiskBootTakeAway(const DiskUnbootAsk* a, DiskUnbootSaid* said)
+{
+    memset(said, 0, sizeof(*said));
+    DiskTable t;
+    error_t   rc = DiskTableRead(a->seat, &t);
+    if (rc != OK)
+        return rc;
+    DiskPart part;
+    bool     found = false;
+    for (uint32_t i = 0; i < t.part_count; i++)
+        if (t.parts[i].entry == a->entry) {
+            part  = t.parts[i];
+            found = true;
+        }
+    uint32_t block_bytes = t.block_bytes;
+    if (t.seating != a->seating || t.state == DISK_TABLE_REFUSED)
+        rc = t.state == DISK_TABLE_REFUSED ? ERR_DEVICE_NOT_READY : ERR_OBJECT_NOT_FOUND;
+    else if (t.state != DISK_TABLE_GPT)
+        rc = ERR_INVALID_STATE;
+    else if (!found)
+        rc = ERR_OUT_OF_RANGE;
+    else if (part.kind != DISK_PART_ESP)
+        rc = ERR_INVALID_ARGUMENT;
+    DiskTableLetGo(&t);
+    if (rc != OK)
+        return rc;
+
+    DiskBootAsk asked = { .seat = a->seat, .seating = a->seating, .entry = a->entry };
+    int         fat   = EspCleared(a, &part, block_bytes, said);
+    if (fat != FAT_OK)
+        return EspRefusal(&asked, fat, "the taking away of BoxOS's loader");
+
+    EfiPartition where = { .number = (uint32_t)a->entry + 1u, .first = part.first,
+                           .blocks = part.last - part.first + 1u };
+    memcpy(where.unique, part.unique, 16);
+    rc = EfiBootOptionsTakeAway(&where, ESP_LOADER, &said->options);
+    if (rc == ERR_UNSUPPORTED)
+        rc = OK;            /* a BIOS start: no firmware to tell */
+    if (rc != OK)
+        return rc;
+
+    /* The boot sector's code, when it is BoxOS's: taken off, the table kept. */
+    if (a->stage1 && a->stage1_bytes == BIOS_SECTOR_BYTES && block_bytes == BIOS_SECTOR_BYTES) {
+        DiskFatPlace head;
+        uint8_t      sector[BIOS_SECTOR_BYTES];
+        DiskFatPlaced(&head, a->seat, a->seating, 0, 1, BIOS_SECTOR_BYTES);
+        if (head.medium.read(head.medium.ctx, 0, 1, sector) != 0)
+            return BiosRefusal(&asked, "the read of sector 0");
+        if (memcmp(sector, a->stage1, BIOS_STAGE2_LBA_AT) == 0) {
+            memset(sector, 0, BIOS_STAGE2_LBA_AT + 8u);
+            if (head.medium.write(head.medium.ctx, 0, 1, sector) != 0 || head.medium.flush(head.medium.ctx) != 0)
+                return BiosRefusal(&asked, "sector 0 without BoxOS's code");
+            said->bios = true;
+        }
+    }
+    kprintf("[DiskBoot] seat %u: BoxOS starts from it no more — %s%s%u boot option(s) of the firmware taken "
+            "away%s\n", a->seat, said->loader ? "its directory taken off the ESP, " : "",
+            said->fallback ? "the ESP's default with it, being BoxOS's, " : "", said->options,
+            said->bios ? ", and its code off the boot sector" : "");
+    return OK;
+}

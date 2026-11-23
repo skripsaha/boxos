@@ -24,7 +24,12 @@
 #            machine stopped — and started again: install says where it
 #            stopped, goes on, and the volume holds every file once;
 #   again    the fixed disk, Home standing on it, given BoxOS anew: Home is
-#            named among what goes, put away, and the disk laid anew.
+#            named among what goes, put away, and the disk laid anew;
+#   remove   BoxOS taken off again by `install remove`, signed for: the fixed
+#            disk left an empty GPT, the firmware's entry taken away; the
+#            Windows stick keeping Windows' partition and loader byte for byte,
+#            BoxOS's directory and partition gone; the stick's BIOS boot
+#            partition gone and BoxOS's code off its boot sector.
 # ---------------------------------------------------------------------------
 
 INSTALL_DISKS="fixed cut"
@@ -249,21 +254,62 @@ print(next(p["first"] for p in json.load(sys.stdin)["parts"] if p["kind"] == "es
     install_volume "$SCRATCH/install.cut.img" Cut && [ -z "$twice" ]
     chk $? "install (cut): the volume holds, every file of it once${twice:+ — twice: $twice}"
 
-    # ── again: the fixed disk laid anew, Home put away ────────────────────
+    # ── again: the fixed disk laid anew, Home put away; then removed ──────
     rc=1
-    if install_boot again on "$SCRATCH/install.home.img" fixed && disks_ask "disks"; then
-        fixed=$(disks_number "6 GB")
+    if install_boot again on "$SCRATCH/install.home.img" fixed pocket win && disks_ask "disks"; then
+        fixed=$(disks_number "6 GB") pocket=$(disks_number "3 GB") win=$(disks_number "2 GB")
         at=$(($(wc -l < build/serial.log) + 1))
         [ -n "$fixed" ] && type_line "install $fixed whole fresh called Again first" && install_sign "$at" &&
-            install_done "$at" && rc=0
+            install_done "$at" && cp "$SCRATCH/install.fixed.img" "$SCRATCH/install.fixed.again" &&
+            at=$(($(wc -l < build/serial.log) + 1)) &&
+            type_line "install remove $fixed" && install_sign "$at" &&
+            wait_for_line build/serial.log "BoxOS is taken off" "$WAIT_QUIET_S" "$at" && wait_for_prompt &&
+            at=$(($(wc -l < build/serial.log) + 1)) &&
+            type_line "install remove $win" && install_sign "$at" &&
+            wait_for_line build/serial.log "BoxOS is taken off" "$WAIT_QUIET_S" "$at" && wait_for_prompt &&
+            at=$(($(wc -l < build/serial.log) + 1)) &&
+            type_line "install remove $pocket" && install_sign "$at" &&
+            wait_for_line build/serial.log "BoxOS is taken off" "$WAIT_QUIET_S" "$at" && wait_for_prompt && rc=0
     fi
     install_halt again || rc=1
     [ $rc = 0 ]
-    chk $? "install (again): the fixed disk given BoxOS anew, and the halt ends"
+    chk $? "install (again): the fixed disk given BoxOS anew, BoxOS taken off three disks, and the halt ends"
     install_said again '^  BoxOS, .* — the BoxOS volume Home, [0-9]+ file\(s\)$' "the volume standing on it is named among what goes"
     install_said again '^\[TagFS\] volume [0-9]+ is put away: let go of' "and it is put away before the disk is laid anew"
-    install_volume "$SCRATCH/install.fixed.img" Again
+    install_volume "$SCRATCH/install.fixed.again" Again
     chk $? "install (again): the fixed disk's volume holds, called Again"
+
+    install_said again '^What stays, as it is:$' "taking BoxOS off the Windows stick says what stays"
+    install_said again '^  Windows data, .* — NTFS$' "and names Windows' partition among it"
+    install_said again '\[EFI\] Boot[0-9A-F]{4}, which named EFI/BoxOS/gangway.efi on GPT partition [0-9]+, is taken away' \
+        "the firmware's entry for BoxOS is taken away"
+    python3 tools/disks.py read "$SCRATCH/install.fixed.img" --json | python3 -c 'import json, sys
+t = json.load(sys.stdin)
+sys.exit(0 if t["state"] == "gpt" and not t["parts"] else 1)'
+    chk $? "install (remove): the fixed disk is left an empty GPT — its ESP held nothing but BoxOS's"
+    python3 - "$SCRATCH/install.win.before" "$SCRATCH/install.win.img" <<'PY'
+import hashlib, json, subprocess, sys
+before, after = sys.argv[1:]
+read = lambda img: json.loads(subprocess.check_output(["python3", "tools/disks.py", "read", img, "--json"]))["parts"]
+win = next(p for p in read(before) if p["kind"] == "windows")
+digest = lambda img: hashlib.sha256(open(img, "rb").read()[win["first"] * 512:(win["last"] + 1) * 512]).digest()
+sys.exit(0 if digest(before) == digest(after) and [p["kind"] for p in read(after)] == ["esp", "windows"] else 1)
+PY
+    chk $? "install (remove): the Windows stick keeps its ESP and Windows' partition byte for byte, BoxOS's partition gone"
+    esp=$(python3 tools/disks.py read "$SCRATCH/install.win.img" --json | python3 -c 'import json, sys
+print(next(p["first"] for p in json.load(sys.stdin)["parts"] if p["kind"] == "esp"))')
+    build/fat --at "$esp" "$SCRATCH/install.win.img" get EFI/Microsoft/Boot/bootmgfw.efi "$SCRATCH/install.after.bin" 2>/dev/null &&
+        cmp -s "$SCRATCH/install.after.bin" "$SCRATCH/install.bootmgfw.bin" &&
+        ! build/fat --at "$esp" "$SCRATCH/install.win.img" get EFI/BoxOS/gangway.efi "$SCRATCH/install.loader.bin" 2>/dev/null
+    chk $? "install (remove): the shared ESP keeps Windows' loader byte for byte, BoxOS's directory gone"
+    python3 - "$SCRATCH/install.pocket.img" <<'PY'
+import json, subprocess, sys
+img = sys.argv[1]
+t = json.loads(subprocess.check_output(["python3", "tools/disks.py", "read", img, "--json"]))
+mbr = open(img, "rb").read(512)
+sys.exit(0 if not t["parts"] and mbr[:440] == bytes(440) and mbr[446 + 4] == 0xEE else 1)
+PY
+    chk $? "install (remove): the stick is left an empty GPT, its BIOS boot partition gone and BoxOS's code off its boot sector"
     ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|DEFECT' "$SCRATCH"/serial.install.*.log
     chk $? "install: no panic, no fault, no defect said in any start"
     rm -f build/edk2-vars.fd

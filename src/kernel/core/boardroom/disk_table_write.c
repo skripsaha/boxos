@@ -448,7 +448,7 @@ error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t
     return rc;
 }
 
-error_t DiskTableRemove(uint8_t seat, uint32_t seating, uint16_t entry, const DiskInUse* used)
+error_t DiskTableRemove(uint8_t seat, uint32_t seating, uint16_t entry, const DiskInUse* used, bool owned)
 {
     DiskTable t;
     error_t   rc = DiskChangeBegin(seat, seating, &t);
@@ -462,7 +462,7 @@ error_t DiskTableRemove(uint8_t seat, uint32_t seating, uint16_t entry, const Di
             part = &t.parts[i];
     if (rc == OK && !part)
         rc = ERR_OUT_OF_RANGE;
-    else if (rc == OK && part->kind != DISK_PART_BOXOS) {
+    else if (rc == OK && part->kind != DISK_PART_BOXOS && !owned) {
         kprintf("[DiskTable] seat %u: entry %u is a %s partition — only BoxOS's own are taken away\n", seat, entry,
                 DiskKindName(part->kind));
         rc = ERR_INVALID_ARGUMENT;

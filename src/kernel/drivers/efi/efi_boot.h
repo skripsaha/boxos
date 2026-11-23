@@ -37,4 +37,11 @@ typedef struct {
 error_t EfiBootOptionPut(const char* description, const EfiPartition* part, const char* path, const void* data,
                          uint32_t data_bytes, bool first, uint16_t* number);
 
+/* Every Boot#### of this firmware that names `path` on `part` deleted, and
+ * its number taken out of BootOrder; *removed (NULL for none) how many. OK —
+ * none named it is OK too; ERR_UNSUPPORTED with no runtime services to ask (a
+ * BIOS start); ERR_WRITE_FAILED when the firmware refused a write — what it
+ * took before kept. */
+error_t EfiBootOptionsTakeAway(const EfiPartition* part, const char* path, uint32_t* removed);
+
 #endif /* EFI_BOOT_H */

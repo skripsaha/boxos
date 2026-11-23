@@ -739,8 +739,10 @@
  *                   one free run, from its grain; out_crate (optional)
  *                   [u16 entry], the place it took
  *   hw.disk.remove  params + [u16 entry]: BoxOS's own partition taken away —
- *                   never another's (ERR_INVALID_ARGUMENT), never one a volume
- *                   of the house stands on (ERR_BUSY)
+ *                   its BoxOS partition, an ESP holding nothing of any system,
+ *                   a BIOS boot partition holding BoxOS's second stage — never
+ *                   another's (ERR_INVALID_ARGUMENT), never one a volume of
+ *                   the house stands on (ERR_BUSY)
  *   hw.disk.mend    both copies of a GPT written from the one read, the far
  *                   one at the end of the disk; OK and nothing written when
  *                   they hold and agree
@@ -759,6 +761,15 @@
  *                   volume that keeps no loader; ERR_CORRUPTED for an ESP whose
  *                   FAT32 does not read; ERR_TAGFS_NO_SPACE for one with no
  *                   room. A start with no firmware runtime gives no option
+ *   hw.disk.unboot  params + [u16 entry]: BoxOS made to start from the ESP in
+ *                   `entry` no more — every file under BoxOS's own directory
+ *                   there taken away and the directory with them, the ESP's
+ *                   removable-media default when it is BoxOS's loader byte for
+ *                   byte, every boot option of the firmware naming BoxOS's
+ *                   loader there, and the boot sector's code when it is
+ *                   BoxOS's; another system's never touched. out_crate
+ *                   (optional) [u8 boot options taken away][u8 directory taken
+ *                   away][u8 default taken away][u8 boot code taken off]
  *   hw.disk.grow    params + [u16 entry][u64 blocks]: BoxOS's own partition
  *                   grown into the room right after it, to `blocks` long or
  *                   all of that room for 0, a whole number of the volume's
@@ -779,6 +790,7 @@
 #define HW_DISK_MEND          0x55
 #define HW_DISK_GROW          0x56
 #define HW_DISK_BOOT          0x57
+#define HW_DISK_UNBOOT        0x58
 
 /* The screen is lent to the one system program that draws (screen.h). */
 #define HW_SCREEN_CLAIM         0x60
