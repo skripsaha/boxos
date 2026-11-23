@@ -26,7 +26,10 @@ says — which the host stand (tools/gangway_stand.sh) then holds the Lectern
 itself to, line for line, on every one of them written out by --emit; and
 logcheck's bookboot boots A7 and A9 through OVMF."""
 
+import copy
+
 from . import binder, bookread, ondisk, stitch, tally
+from .bookread import PAYLOAD_BYTES
 from .bootread import ASKED, CALLED, CALLED_MOST, SCENE, WHO, BootRead, Loaded, Succession
 from .bookground import BookGround
 from .medium import Unreadable
@@ -228,16 +231,28 @@ def BootCases(bt):
         binder.BindWrite(o, g, bound[1])
         Flip(o, middle, 100)
 
-    def Ribbon(after=(), hop=False):
+    def ClaspApart(pen, records):
+        """`records` and, after them, a record to step over (kind 31, as B11's)
+        as long as puts the stitch's Clasp at the start of a sector: the
+        records end in a sector before the Clasp's, whatever their length."""
+        trial = copy.copy(pen).Sew(records, flags=stitch.DATA_FLUSHED, write=False)
+        room = -trial.starts[-1] % PAYLOAD_BYTES
+        room += PAYLOAD_BYTES if room < 3 else 0
+        body = room - 2 if room - 2 < 128 else room - 3
+        return records + [stitch.Unknown(31, True, b"\0" * body)]
+
+    def Ribbon(after=(), hop=False, clasp_apart=False):
         """The spare born on the ribbon in a stitch of its own — `hop`, at the
-        start of the next_quire — then `after` (o, pen, the stitch it was born
-        in); BOOT's code flipped."""
+        start of the next_quire; `clasp_apart`, its Clasp in a sector the Born
+        does not reach — then `after` (o, pen, the stitch it was born in);
+        BOOT's code flipped."""
         def Plant(o):
             sp.Lay(bt, o)
             pen = bt.Pen(o)
             if hop:
                 pen.Hop()
-            born = pen.Sew(sp.Records(), flags=stitch.DATA_FLUSHED)
+            records = ClaspApart(pen, sp.Records()) if clasp_apart else sp.Records()
+            born = pen.Sew(records, flags=stitch.DATA_FLUSHED)
             for step in after:
                 step(o, pen, born)
             Flip(o, middle, 100)
@@ -263,10 +278,12 @@ def BootCases(bt):
                                digests=[bookread.Integrity(junk, bt.lanes)])], flags=stitch.DATA_FLUSHED)
 
     def Damaged(o, pen, born):
-        """A stitch after the spare's, and the last sector of the spare's
-        spoilt: what lies before it reads by `lead`."""
+        """A stitch after the spare's, and the sector the spare's Clasp begins
+        in spoilt — one the Born does not reach (Ribbon clasp_apart), however
+        many digests the kernel's size gives it: the Born before it reads by
+        `lead`."""
         pen.Sew([stitch.UseContext(b"after")], flags=stitch.DATA_FLUSHED)
-        bt.Rot(o, born.vlbas[-1])
+        bt.Rot(o, born.vlbas[born.starts[-1] // PAYLOAD_BYTES])
 
     text = b"# what I like\nstartup all\ncores 2\n"
     note = Note(bt, bt.fid, 0, text)
@@ -418,7 +435,8 @@ def BootCases(bt):
                  ("rule (б) sews it on, and the spare, fid %u, is attested" % sp.fid,
                   lambda c: "the ribbon past slot 0's Tally: 1 stitch(es) sewn on, seq 3 to 3" in Verdict(c) and
                   Verdict(c)[-1] == spare)]),
-        Case("A15 the spare's stitch closed and damaged", Ribbon([Damaged]), must={"DIGEST_MISMATCH", "STITCH_TORN"},
+        Case("A15 the spare's stitch closed and damaged", Ribbon([Damaged], clasp_apart=True),
+             must={"DIGEST_MISMATCH", "STITCH_TORN"},
              checks=[("rule (в) sews it on with the stitch after it, and the spare, fid %u, is attested by what of "
                       "its Born reads" % sp.fid,
                       lambda c: "the ribbon past slot 0's Tally: 2 stitch(es) sewn on, seq 3 to 4" in Verdict(c) and
