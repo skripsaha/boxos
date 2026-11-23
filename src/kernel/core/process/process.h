@@ -473,12 +473,13 @@ typedef struct process_t
     Baton             alarm_baton;
     volatile uint8_t  alarm_passed;
 
-    /* The newest change of a volume this strand's own calls made — the place
-     * of their newest Ink, which tells a mount before this one apart
-     * (TagFSNoteInker). A strand that ends with it unsettled on the mounted
-     * volume demands the next Settle cycle; a strand that only read owes
-     * nothing. */
-    volatile uint64_t volume_ink_place;
+    /* The newest change of each volume this strand's own calls made — the
+     * place of their newest Ink, which tells a mount before this one apart
+     * (tagfs.h, TagFSNoteInker): the home volume's here, every other one's in
+     * the list after it. A strand that ends with one unsettled demands that
+     * volume's next Settle cycle; a strand that only read owes nothing. */
+    volatile uint64_t           volume_ink_place;
+    struct VolumeInkDebt*       volume_ink_more;
 
     /* Nameplate — where this image's "address -> name" table is mapped, found
      * by the loader (nameplate_locate) at the one moment the whole file is in

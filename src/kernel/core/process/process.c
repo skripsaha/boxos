@@ -982,7 +982,7 @@ void process_destroy(process_t *proc)
     TouchQueueDisarm(&proc->alarm_node);
 
     /* And a change of its own it left unsettled is not left to Lull. */
-    TagFSInkerLeaves(TagFSHome(), proc);
+    TagFSInkerLeaves(proc);
 
     ManifestReleaseAllForOwner(proc->pid);
 

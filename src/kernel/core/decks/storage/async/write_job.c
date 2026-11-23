@@ -511,7 +511,7 @@ int wjob_finalize(WriteJob *j, error_t rc)
                : j->kind == WRITE_JOB_SPAN  ? wjob_span_changed(j)
                                             : rc == OK;
     if (j->target && inked)
-        TagFSNoteInker(j->target, TagFSInkPlace(TagFSHome(), InkGenOf(TagFSHome(), j->file_id)));
+        TagFSNoteInker(j->target, TagFSHome(), TagFSInkPlace(TagFSHome(), InkGenOf(TagFSHome(), j->file_id)));
     wjob_publish(j);
     if (j->kind == WRITE_JOB_WRITE)
         TagFSDataCostWrite(TagFSHome());

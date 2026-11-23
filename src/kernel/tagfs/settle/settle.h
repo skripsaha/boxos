@@ -69,7 +69,7 @@ error_t  SettleForRoom(TagFSVolume* vol);
  * them or not, and a clean seal is the next mount's word that every digest on
  * the medium stands (RT-22).
  */
-error_t  TagFSSettleForHalt(void);
+error_t  TagFSSettleForHalt(TagFSVolume* vol);
 
 /*
  * The machine is stopping (RT-12), said by the halt before its drain begins:
@@ -92,7 +92,7 @@ bool     SettleHalting(TagFSVolume* vol);
  * when no volume is mounted. And the steps every cycle took this boot, on any
  * core, the halt's own too: a cycle that still takes them is going on,
  * however long it is. */
-void     SettleOwed(uint64_t* unsettled, bool* committer_busy, bool* sealed_clean);
+void     SettleOwed(TagFSVolume* vol, uint64_t* unsettled, bool* committer_busy, bool* sealed_clean);
 uint64_t SettleStepsTaken(TagFSVolume* vol);
 
 /* Whether this core holds a cycle that stands between two of its steps: on a

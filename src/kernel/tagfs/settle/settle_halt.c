@@ -70,9 +70,8 @@ bool SettleHalting(TagFSVolume* vol)
     return __atomic_load_n(&vol->settle_halt.halting, __ATOMIC_SEQ_CST);
 }
 
-error_t TagFSSettleForHalt(void)
+error_t TagFSSettleForHalt(TagFSVolume* vol)
 {
-    TagFSVolume* vol = TagFSHome();
     if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
     TagFSShutForHalt(vol);

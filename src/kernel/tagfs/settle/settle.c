@@ -51,9 +51,8 @@ void SettleMountReset(TagFSVolume* vol)
     __atomic_store_n(&vol->settle.refusal_said, 0u, __ATOMIC_RELEASE);
 }
 
-void SettleOwed(uint64_t* unsettled, bool* committer_busy, bool* sealed_clean)
+void SettleOwed(TagFSVolume* vol, uint64_t* unsettled, bool* committer_busy, bool* sealed_clean)
 {
-    TagFSVolume* vol = TagFSHome();
     if (!vol->state.initialized) {
         *unsettled      = 0;
         *committer_busy = false;

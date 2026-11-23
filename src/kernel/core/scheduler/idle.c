@@ -18,7 +18,6 @@
 #include "cpuid.h"          // g_cpu_caps.has_monitor (MWAIT idle)
 #include "cpu_calibrate.h"  // cpu_tsc_recal_if_pending — periodic TSC recal
 #include "tagfs.h"
-#include "helm.h"          /* HelmReadyListed — a write between two windows */
 #include "use_context.h"
 
 // BSP idle process (static, PID 0)
@@ -162,7 +161,7 @@ bool process_is_idle(process_t* proc) {
  * BatonOneWayIdleOwed). Asked by schedule() of a core that ran a program. */
 bool IdleOwed(void)
 {
-    return TagFSIdleOwed(TagFSHome()) || BatonOneWayIdleOwed();
+    return TagFSIdleOwed() || BatonOneWayIdleOwed();
 }
 
 // One idle wait, executed each iteration of idle_loop (idle_loop.asm).
@@ -271,7 +270,7 @@ void cpu_idle(void) {
      * and a write would move one window a tick. So is the next step of the
      * volume's Settle cycle, or one that is due. Interrupts are on from here,
      * as after a sleep, so a tick still takes the core for a program. */
-    if (HelmReadyListed(TagFSHome()) || TagFSStepOwedHere()) {
+    if (TagFSStepOwedHere()) {
         __asm__ volatile("sti" ::: "memory");
         return;
     }

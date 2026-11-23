@@ -118,12 +118,12 @@ static TestResult TestStandSettleIdleOwed(void)
 
     SettleCadenceHold(vol, false);
     TEST_ASSERT_OK(TagFSSettle(vol), "the volume owes nothing to begin with");
-    TEST_ASSERT(!TagFSIdleOwed(vol), "with nothing owed, idle is owed no quantum");
+    TEST_ASSERT(!TagFSVolumeIdleOwed(vol), "with nothing owed, idle is owed no quantum");
     SettleDemand(vol, SETTLE_DEMAND_LEAVE);
-    TEST_ASSERT_EQ(TagFSIdleOwed(vol), one_core,
+    TEST_ASSERT_EQ(TagFSVolumeIdleOwed(vol), one_core,
                    "a demand makes idle the debtor on one core, and nowhere else");
     TEST_ASSERT_OK(TagFSSettle(vol), "a cycle takes the demand up");
-    TEST_ASSERT(!TagFSIdleOwed(vol), "and idle is owed nothing after it");
+    TEST_ASSERT(!TagFSVolumeIdleOwed(vol), "and idle is owed nothing after it");
 out:
     SettleCadenceHold(vol, true);
     return verdict;
@@ -417,19 +417,19 @@ static TestResult TestStandSettleReaderOwesNoLeave(void)
                    (int)TAGFS_BLOCK_SIZE, "a change nobody here made is inked");
     TEST_ASSERT(InkedGen(vol) > SettledGen(vol), "and waits for its cycle");
 
-    uint64_t inked = TagFSInkedHere(vol);
+    uint64_t call = TagFSCallBegins();
     TEST_ASSERT_EQ(TestFileRead(vol, file_id, g_test_output, TAGFS_BLOCK_SIZE), (int)TAGFS_BLOCK_SIZE,
                    "a program's call reads the file");
-    TagFSNoteInkerSince(vol, &s_stand_reader, inked);
-    TagFSInkerLeaves(vol, &s_stand_reader);
+    TagFSCallEnds(&s_stand_reader, call);
+    TagFSInkerLeaves(&s_stand_reader);
     TEST_ASSERT(!(TagFSStandSettleDemands(vol) & SETTLE_DEMAND_LEAVE),
                 "the reader leaves, and demands no cycle");
 
-    inked = TagFSInkedHere(vol);
+    call = TagFSCallBegins();
     TEST_ASSERT_EQ(StandWriteAt(vol, file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
                    (int)TAGFS_BLOCK_SIZE, "a program's call writes the file");
-    TagFSNoteInkerSince(vol, &s_stand_writer, inked);
-    TagFSInkerLeaves(vol, &s_stand_writer);
+    TagFSCallEnds(&s_stand_writer, call);
+    TagFSInkerLeaves(&s_stand_writer);
     TEST_ASSERT(TagFSStandSettleDemands(vol) & SETTLE_DEMAND_LEAVE,
                 "the writer leaves with its change unsettled, and demands the next cycle");
 out:
@@ -523,10 +523,10 @@ static TestResult TestStandSettleRemountOwesItsOwn(void)
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x4Eu);
     TEST_ASSERT(StandMakeFile(vol, "settle_remount", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    uint64_t inked = TagFSInkedHere(vol);
+    uint64_t call = TagFSCallBegins();
     TEST_ASSERT_EQ(StandWriteAt(vol, file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
                    (int)TAGFS_BLOCK_SIZE, "a program's call writes it");
-    TagFSNoteInkerSince(vol, &s_stand_writer, inked);
+    TagFSCallEnds(&s_stand_writer, call);
     uint64_t gen_before = InkedGen(vol);
 
     TEST_ASSERT(StandSettledBare(vol), "every change is on the medium, and nothing rests");
@@ -535,16 +535,16 @@ static TestResult TestStandSettleRemountOwesItsOwn(void)
     TEST_ASSERT_EQ(tagfs_mount_epoch(vol), epoch + 1u, "once");
     TEST_ASSERT_EQ(SettleLastDUs(vol), 0, "and no cycle's cost on its medium carries over");
 
-    TagFSInkerLeaves(vol, &s_stand_writer);
+    TagFSInkerLeaves(&s_stand_writer);
     TEST_ASSERT(!(TagFSStandSettleDemands(vol) & SETTLE_DEMAND_LEAVE),
                 "the program's change of the mount before is not owed here");
-    inked = TagFSInkedHere(vol);
+    call = TagFSCallBegins();
     TEST_ASSERT_EQ(StandWriteAt(vol, file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
                    (int)TAGFS_BLOCK_SIZE, "it writes the file on this mount");
     TestEvidence("the gen of its change here, below the mount before's", InkedGen(vol));
     TEST_ASSERT(InkedGen(vol) < gen_before, "with a gen below the one it wrote at before");
-    TagFSNoteInkerSince(vol, &s_stand_writer, inked);
-    TagFSInkerLeaves(vol, &s_stand_writer);
+    TagFSCallEnds(&s_stand_writer, call);
+    TagFSInkerLeaves(&s_stand_writer);
     TEST_ASSERT(TagFSStandSettleDemands(vol) & SETTLE_DEMAND_LEAVE,
                 "and leaves with that change unsettled: the next cycle is demanded");
 out:

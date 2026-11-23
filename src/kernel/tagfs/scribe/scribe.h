@@ -86,7 +86,7 @@ error_t  VolumeFlushFor(TagFSVolume* vol, uint64_t need);
  * write still takes the medium's answers (system_halt.c).
  */
 void     VolumeWriteSeen(TagFSVolume* vol);
-uint64_t VolumeWritesAnswered(void);
+uint64_t VolumeWritesAnswered(TagFSVolume* vol);
 
 // ============================================================================
 // Scribe — one writer of a structure at a time, and a caller who waited sees

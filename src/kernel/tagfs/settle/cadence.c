@@ -77,9 +77,13 @@ uint64_t TagFSInkPlace(TagFSVolume* vol, uint64_t gen)
     return __atomic_load_n(&vol->cadence.ink_base, __ATOMIC_ACQUIRE) + gen;
 }
 
-uint64_t TagFSInkedHere(TagFSVolume* vol)
+/* The number of the call each core is serving, or served last: one order a
+ * core, for the whole house (TagFSCallBegins). */
+static volatile uint64_t s_call[MAX_CORES];
+
+uint64_t TagFSCallBegins(void)
 {
-    return __atomic_load_n(&vol->cadence.inked_here[amp_get_core_index()], __ATOMIC_RELAXED);
+    return __atomic_add_fetch(&s_call[amp_get_core_index()], 1u, __ATOMIC_RELAXED);
 }
 
 /* A mount's first word, with the door shut: no Ink of the volume before it is
@@ -105,7 +109,10 @@ void CadenceMountReset(TagFSVolume* vol)
 
 void SettleInked(TagFSVolume* vol, uint64_t gen, bool lazy)
 {
-    __atomic_store_n(&vol->cadence.inked_here[amp_get_core_index()], TagFSInkPlace(vol, gen), __ATOMIC_RELAXED);
+    uint32_t core = amp_get_core_index();
+    __atomic_store_n(&vol->cadence.inked_here[core], TagFSInkPlace(vol, gen), __ATOMIC_RELAXED);
+    __atomic_store_n(&vol->cadence.inked_call[core], __atomic_load_n(&s_call[core], __ATOMIC_RELAXED),
+                     __ATOMIC_RELAXED);
     uint64_t none = 0;
     (void)__atomic_compare_exchange_n(&vol->cadence.owed_since_us, &none, SettleNowUs(), false,
                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
@@ -376,8 +383,10 @@ bool SettleIdleOwed(TagFSVolume* vol)
  * nested inside the very service point that looked at the list (Z07-8). */
 bool TagFSStepOwedHere(void)
 {
-    TagFSVolume* vol = TagFSHome();
-    return HelmReadyListed(vol) || SettleStepOwedHere(vol);
+    for (TagFSVolume* vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol))
+        if (HelmReadyListed(vol) || SettleStepOwedHere(vol))
+            return true;
+    return false;
 }
 
 /* ‼ ON ONE CORE, HELM WORK MAKES IDLE THE DEBTOR OF THE QUANTUM, AS A CYCLE DOES.
@@ -388,33 +397,73 @@ bool TagFSStepOwedHere(void)
  * five seconds apart (X1-2). Listed Helm work owes idle the next quantum too,
  * taken from whoever ran this one: the program has the core back after it, and
  * the two share the core turn about. */
-bool TagFSIdleOwed(TagFSVolume* vol)
+bool TagFSVolumeIdleOwed(TagFSVolume* vol)
 {
     if (g_amp.total_cores != 1)
         return false;
     return HelmReadyListed(vol) || SettleIdleOwed(vol);
 }
 
-void TagFSWatchLook(void)
+bool TagFSIdleOwed(void)
 {
-    TagFSVolume* vol = TagFSHome();
-    SettleWatchLook(vol, SettleNowUs());
+    for (TagFSVolume* vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol))
+        if (TagFSVolumeIdleOwed(vol))
+            return true;
+    return false;
 }
 
-void TagFSNoteInker(process_t* proc, uint64_t place)
+void TagFSWatchLook(void)
 {
-    uint64_t seen = __atomic_load_n(&proc->volume_ink_place, __ATOMIC_RELAXED);
-    while (seen < place &&
-           !__atomic_compare_exchange_n(&proc->volume_ink_place, &seen, place, false,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+    uint64_t now = SettleNowUs();
+    for (TagFSVolume* vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol))
+        SettleWatchLook(vol, now);
+}
+
+static void InkPlaceKeep(volatile uint64_t* at, uint64_t place)
+{
+    uint64_t seen = __atomic_load_n(at, __ATOMIC_RELAXED);
+    while (seen < place && !__atomic_compare_exchange_n(at, &seen, place, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         ;
 }
 
-void TagFSNoteInkerSince(TagFSVolume* vol, process_t* proc, uint64_t inked_before)
+/* The home volume's debt is the strand's own word; another volume's is a note
+ * in its list, put in front with no lock the first time the strand changes
+ * that volume. A note the machine has no memory for is not kept but paid: the
+ * volume's next cycle demanded now, as if the strand had left. */
+void TagFSNoteInker(process_t* proc, TagFSVolume* vol, uint64_t place)
 {
-    uint64_t inked = TagFSInkedHere(vol);
-    if (inked != inked_before)
-        TagFSNoteInker(proc, inked);
+    if (vol == TagFSHome()) {
+        InkPlaceKeep(&proc->volume_ink_place, place);
+        return;
+    }
+    for (VolumeInkDebt* d = __atomic_load_n(&proc->volume_ink_more, __ATOMIC_ACQUIRE); d; d = d->next) {
+        if (d->volume == vol->number) {
+            InkPlaceKeep(&d->place, place);
+            return;
+        }
+    }
+    VolumeInkDebt* d = kmalloc(sizeof(*d));
+    if (!d) {
+        SettleDemand(vol, SETTLE_DEMAND_LEAVE);
+        return;
+    }
+    d->volume = vol->number;
+    d->place  = place;
+    VolumeInkDebt* head = __atomic_load_n(&proc->volume_ink_more, __ATOMIC_RELAXED);
+    do {
+        d->next = head;
+    } while (!__atomic_compare_exchange_n(&proc->volume_ink_more, &head, d, false, __ATOMIC_RELEASE,
+                                          __ATOMIC_RELAXED));
+}
+
+void TagFSCallEnds(process_t* proc, uint64_t call)
+{
+    if (!proc)
+        return;
+    uint32_t core = amp_get_core_index();
+    for (TagFSVolume* vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol))
+        if (__atomic_load_n(&vol->cadence.inked_call[core], __ATOMIC_RELAXED) >= call)
+            TagFSNoteInker(proc, vol, __atomic_load_n(&vol->cadence.inked_here[core], __ATOMIC_RELAXED));
 }
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -424,15 +473,28 @@ uint32_t TagFSStandSettleDemands(TagFSVolume* vol)
 }
 #endif
 
-/* A place below this mount's base is an Ink of a volume before it: its
- * changes went with that volume, and nothing of this one is owed for it. */
-void TagFSInkerLeaves(TagFSVolume* vol, process_t* proc)
+/* A place below this mount's base is an Ink of a mount before it: its
+ * changes went with that mount, and nothing of this one is owed for it. */
+static void InkerLeavesVolume(TagFSVolume* vol, uint64_t place)
 {
-    uint64_t place = __atomic_load_n(&proc->volume_ink_place, __ATOMIC_ACQUIRE);
-    uint64_t base  = __atomic_load_n(&vol->cadence.ink_base, __ATOMIC_ACQUIRE);
+    uint64_t base = __atomic_load_n(&vol->cadence.ink_base, __ATOMIC_ACQUIRE);
     if (!CadenceMounted(vol) || place <= base || place - base <= SettledGen(vol))
         return;
     SettleDemand(vol, SETTLE_DEMAND_LEAVE);
+}
+
+void TagFSInkerLeaves(process_t* proc)
+{
+    InkerLeavesVolume(TagFSHome(), __atomic_load_n(&proc->volume_ink_place, __ATOMIC_ACQUIRE));
+    VolumeInkDebt* d = __atomic_exchange_n(&proc->volume_ink_more, NULL, __ATOMIC_ACQ_REL);
+    while (d) {
+        VolumeInkDebt* next = d->next;
+        TagFSVolume*   vol  = TagFSVolumeNumbered(d->volume);
+        if (vol)
+            InkerLeavesVolume(vol, d->place);
+        kfree(d);
+        d = next;
+    }
 }
 
 // ----------------------------------------------------------------------------

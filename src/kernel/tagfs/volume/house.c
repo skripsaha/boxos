@@ -50,6 +50,11 @@ uint32_t TagFSVolumeNumber(const TagFSVolume* vol)
     return vol->number;
 }
 
+bool TagFSVolumeMounted(const TagFSVolume* vol)
+{
+    return vol->state.initialized;
+}
+
 TagFSVolume* TagFSVolumeNumbered(uint32_t number)
 {
     for (TagFSVolume* vol = &s_home; vol; vol = TagFSVolumeNext(vol))

@@ -2,7 +2,7 @@
 #include "manifest_auth.h"
 #include "klib.h"
 #include "boxos_manifest.h"
-#include "tagfs.h"    /* TagFSInkedHere, TagFSNoteInkerSince — a program's own changes */
+#include "tagfs.h"    /* TagFSCallBegins, TagFSCallEnds — a program's own changes */
 
 /*
  * Sequential executor. Walks the compiled op stream once, dispatching each
@@ -26,17 +26,17 @@ static inline bool crate_index_in_range(uint16_t idx, uint16_t crate_count)
     return idx == CRATE_INDEX_NONE || idx < crate_count;
 }
 
-/* An op that changed the volume made its Ink on this core while it was served
- * — the guide does not give the core away meanwhile — so the place of this
- * core's newest Ink moved: the volume keeps it against the program, and a
- * program that leaves with it unsettled is a demand on the Settle (settle.h).
- * An op that read, asked or listed made none, and the program owes nothing for
- * it. An op that parked its caller is noted by its job for the Inks it makes
- * later. */
-static inline void ManifestNoteVolumeChange(uint64_t inked_before, const OpContext *ctx)
+/* An op that changed a volume made its Ink on this core while it was served
+ * — the guide does not give the core away meanwhile — marked with the call's
+ * number (TagFSCallBegins): each volume it changed keeps the place against the
+ * program, and a program that leaves with one unsettled is a demand on that
+ * volume's Settle (settle.h). An op that read, asked or listed made none, and
+ * the program owes nothing for it. An op that parked its caller is noted by
+ * its job for the Inks it makes later. */
+static inline void ManifestNoteVolumeChange(uint64_t call, const OpContext *ctx)
 {
     if (ctx && ctx->proc)
-        TagFSNoteInkerSince(TagFSHome(), ctx->proc, inked_before);
+        TagFSCallEnds(ctx->proc, call);
 }
 
 static error_t dispatch_op(const OpRegistration *reg,
@@ -67,9 +67,9 @@ static error_t dispatch_op(const OpRegistration *reg,
         return ERR_ACCESS_DENIED;
     }
 
-    uint64_t inked = TagFSInkedHere(TagFSHome());
+    uint64_t call  = TagFSCallBegins();
     int      rc    = reg->handler(op, crates, crate_count, ctx);
-    ManifestNoteVolumeChange(inked, ctx);
+    ManifestNoteVolumeChange(call, ctx);
     return rc;
 }
 
@@ -242,9 +242,9 @@ error_t ManifestExecuteOnce(const void              *manifest_kp,
         }
 
         any_executed = true;
-        uint64_t inked = TagFSInkedHere(TagFSHome());
+        uint64_t call  = TagFSCallBegins();
         int      rc    = reg->handler(op, crates, crate_count, ctx);
-        ManifestNoteVolumeChange(inked, ctx);
+        ManifestNoteVolumeChange(call, ctx);
         if (rc != OK) {
             if (first_error == OK) {
                 first_error           = (error_t)rc;

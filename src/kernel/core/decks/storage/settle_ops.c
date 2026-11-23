@@ -435,11 +435,11 @@ static void SettleOpRoomAgain(HelmWaiter *service)
         ctx.crates_uaddr      = s->crates_uaddr;
         ctx.async_owns_crates = &owns;
 
-        uint64_t inked = TagFSInkedHere(TagFSHome());
+        uint64_t call = TagFSCallBegins();
         rc = (error_t)SettleOpAskAgain(s->op, s->crates_kbuf, s->crate_count,
                                        s->target ? &ctx : NULL, &s->again);
         if (s->target)
-            TagFSNoteInkerSince(TagFSHome(), s->target, inked);
+            TagFSCallEnds(s->target, call);
         if (rc == ERR_WOULD_BLOCK && s->again) {
             rc = SettleOpRoomLink(s);
             if (rc == OK)

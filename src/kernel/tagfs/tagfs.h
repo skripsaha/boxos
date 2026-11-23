@@ -14,6 +14,7 @@ TagFSVolume* TagFSHome(void);
 TagFSVolume* TagFSVolumeNext(TagFSVolume* vol);
 TagFSVolume* TagFSVolumeNumbered(uint32_t number);
 uint32_t     TagFSVolumeNumber(const TagFSVolume* vol);
+bool         TagFSVolumeMounted(const TagFSVolume* vol);
 
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
@@ -419,36 +420,46 @@ bool     tagfs_handle_is_of_this_mount(TagFSVolume* vol, const TagFSFileHandle* 
 void     TagFSServiceIfPending(void);
 
 /*
- * The volume's share of the loops (settle/cadence.c). Whether this core's loop
- * owes the volume a turn before it sleeps: Helm work listed for a service
- * point, or the Settle's step. On one core, whether the idle context is owed
- * the next quantum (RT-10) — Helm work listed, or a cycle owed now — read by
- * the scheduler from the tick, lock-free.
+ * The volumes' share of the loops (settle/cadence.c). Whether this core's loop
+ * owes any volume of the house a turn before it sleeps: Helm work listed for
+ * a service point, or a Settle's step. On one core, whether the idle context
+ * is owed the next quantum (RT-10) — Helm work listed, or a cycle owed now —
+ * read by the scheduler from the tick, lock-free; one volume's, for the
+ * stand.
  */
 bool     TagFSStepOwedHere(void);
-bool     TagFSIdleOwed(TagFSVolume* vol);
+bool     TagFSIdleOwed(void);
+bool     TagFSVolumeIdleOwed(TagFSVolume* vol);
 
 /* Nightwatch's look at the Settle, from the PIT tick (RT-11). */
 void     TagFSWatchLook(void);
 
 /*
- * A program's own changes of the volume (settle/cadence.c). An Ink's place is
- * its gen in one order across every mount of the boot, so a place of a volume
- * mounted before this one is told apart. TagFSInkedHere: the place of the
- * newest Ink this core made. TagFSNoteInkerSince: a call of the program was
- * just served on this core, with TagFSInkedHere read before it — the Ink it
- * made, if it made one, is noted; a call that read made none. TagFSInkPlace:
- * the place of this mount's Ink `gen`, inside the door. TagFSNoteInker: the
- * program made the Ink at `place` — the newest is kept. TagFSInkerLeaves: the
- * program is leaving (settle.h) — with a change of its own on this volume no
- * cycle settled, the next cycle is demanded rather than left to Lull.
+ * A program's own changes of the volumes (settle/cadence.c). An Ink's place
+ * is its gen in one order across every mount of its volume this boot, so a
+ * place of a mount before this one is told apart; a program keeps the newest
+ * place of its own on each volume it changed (VolumeInkDebt). TagFSCallBegins:
+ * a call of a program is about to be served on this core — the guide serves
+ * it without giving the core away — and its number is returned; every Ink the
+ * core makes from here is marked with it, on its volume. TagFSCallEnds: that
+ * call served — the newest Ink it made on each volume, if it made any, is the
+ * program's; a call that read made none. TagFSInkPlace: the place of a
+ * mount's Ink `gen`, inside the door. TagFSNoteInker: the program made the
+ * Ink at `place` of `vol` — the newest is kept. TagFSInkerLeaves: the program
+ * is leaving (settle.h) — on each volume where a change of its own is not yet
+ * settled, the next cycle is demanded rather than left to Lull.
  */
 struct process_t;
-uint64_t TagFSInkedHere(TagFSVolume* vol);
-void     TagFSNoteInkerSince(TagFSVolume* vol, struct process_t* proc, uint64_t inked_before);
+typedef struct VolumeInkDebt {
+    uint32_t              volume;   /* its number in the house; never the home volume's, kept in the strand */
+    volatile uint64_t     place;
+    struct VolumeInkDebt* next;
+} VolumeInkDebt;
+uint64_t TagFSCallBegins(void);
+void     TagFSCallEnds(struct process_t* proc, uint64_t call);
 uint64_t TagFSInkPlace(TagFSVolume* vol, uint64_t gen);
-void     TagFSNoteInker(struct process_t* proc, uint64_t place);
-void     TagFSInkerLeaves(TagFSVolume* vol, struct process_t* proc);
+void     TagFSNoteInker(struct process_t* proc, TagFSVolume* vol, uint64_t place);
+void     TagFSInkerLeaves(struct process_t* proc);
 
 /* Memory came back to the machine — a cabin's, torn down: a Settle cycle
  * refused for want of it is looked at again (settle/settle_wait.c). From any
@@ -533,7 +544,7 @@ void     TagFSWriteRefused(TagFSVolume* vol);
 void     TagFSBootMountSettled(void);
 /* The machine is stopping, and its last Settle cycle has run (settle.h,
  * TagFSSettleForHalt): the door shut, and what that cycle answered. */
-error_t tagfs_shutdown(void);
+error_t tagfs_shutdown(TagFSVolume* vol);
 
 /* Flush the volatile write cache of the disk that holds the TagFS volume
  * (routes to the probed AHCI port / ATA drive, not a hardcoded device). The

@@ -187,6 +187,7 @@ typedef struct {
     volatile uint64_t ink_base;  /* the place of this mount's Ink 0 */
     volatile uint64_t ink_top;  /* the newest gen of this mount given a place */
     volatile uint64_t inked_here[MAX_CORES];  /* the place of each core's newest Ink */
+    volatile uint64_t inked_call[MAX_CORES];  /* and the number of the call that core was serving (TagFSCallBegins) */
     /*
      * ‼ A TALLY GOES A STEP A TURN, BETWEEN THE CYCLES (binder.h, §4.3). Its step
      * is the committer's work too: taken when no cycle is due, and — so a stream

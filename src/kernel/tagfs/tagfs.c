@@ -1986,9 +1986,8 @@ static bool tagfs_abandon(TagFSVolume* vol)
  * a halt was never for the machine's benefit, and memory somebody is still
  * reading must not go back to an allocator nobody will ask again.
  */
-error_t tagfs_shutdown(void)
+error_t tagfs_shutdown(TagFSVolume* vol)
 {
-    TagFSVolume* vol = TagFSHome();
     if (!vol->state.initialized) {
         return OK;                      /* nothing mounted, nothing owed */
     }

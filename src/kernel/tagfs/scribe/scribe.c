@@ -55,9 +55,8 @@ void VolumeWriteSeen(TagFSVolume* vol)
     __atomic_add_fetch(&vol->scribe.writes_seen, 1u, __ATOMIC_RELEASE);
 }
 
-uint64_t VolumeWritesAnswered(void)
+uint64_t VolumeWritesAnswered(TagFSVolume* vol)
 {
-    TagFSVolume* vol = TagFSHome();
     return __atomic_load_n(&vol->scribe.writes_seen, __ATOMIC_ACQUIRE);
 }
 
