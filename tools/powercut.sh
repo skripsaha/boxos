@@ -606,7 +606,7 @@ medium_says() {
 import os, re, sys
 d, room, fs = sys.argv[1], open(sys.argv[2]).read(), open(sys.argv[3]).read()
 seat = re.search(r'kprintf\("([^"]*)\\n",\s*s->number,\s*s->name,\s*s->removable \? "([^"]*)" : ""\);', room)
-mount = re.search(r'kprintf\("([^"]*)\\n",\s*g_tagfs_seat,\s*BoardroomSeatName\(g_tagfs_seat\)\);', fs)
+mount = re.search(r'kprintf\("([^"]*)\\n",\s*vol->mount\.seat,\s*BoardroomSeatName\(vol->mount\.seat\)\);', fs)
 if not seat or not mount:
     sys.exit("medium_says: %s prints no %s line by its arguments" % (
         (sys.argv[2], "seat") if not seat else (sys.argv[3], "mount")))

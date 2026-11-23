@@ -67,7 +67,7 @@ run_firstflushmut() {
     mut_on src/kernel/tagfs/settle/sewing.c "logcheck mutation" <<'MUT_EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "        rc           = VolumeFlushFor(s->data_need);\n"
+a = "        rc           = VolumeFlushFor(vol, s->data_need);\n"
 assert s.count(a) == 1
 open(p, "w").write(s.replace(a, "        rc           = OK;   /* logcheck mutation: the stitch's data is never flushed before it */\n"))
 MUT_EOF
@@ -83,7 +83,7 @@ run_lastflushmut() {
     mut_on src/kernel/tagfs/settle/sewing.c "logcheck mutation" <<'MUT_EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "        rc       = VolumeFlushFor(VolumeFlushNeed());\n"
+a = "        rc       = VolumeFlushFor(vol, VolumeFlushNeed(vol));\n"
 assert s.count(a) == 1
 open(p, "w").write(s.replace(a, "        rc       = OK;   /* logcheck mutation: the stitch's last flush is never asked */\n"))
 MUT_EOF
@@ -101,9 +101,9 @@ run_booknextfidmut() {
     mut_on src/kernel/tagfs/mount/book_mount.c "logcheck mutation" <<'MUT_EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    if (w->seen_fid > g_book.next_fid)\n"
+a = "    if (w->seen_fid > vol->book.next_fid)\n"
 assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    if (0 && w->seen_fid > g_book.next_fid)   /* logcheck mutation: the ribbon's fids are not counted */\n"))
+open(p, "w").write(s.replace(a, "    if (0 && w->seen_fid > vol->book.next_fid)   /* logcheck mutation: the ribbon's fids are not counted */\n"))
 MUT_EOF
     mut_run booknextfidmut nextfid reissue defect \
         "the ribbon's fids left out of the next file id, a cut whose ribbon bore the anchor's file hands its id out again"
@@ -117,7 +117,7 @@ run_stitchmut() {
     mut_on src/kernel/tagfs/settle/sewing.c "logcheck mutation" <<'MUT_EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    int rc = tagfs_volume_write(vlba, n, s->sectors + (uint64_t)s->written * BOOK_SECTOR_BYTES);\n"
+a = "    int rc = tagfs_volume_write(vol, vlba, n, s->sectors + (uint64_t)s->written * BOOK_SECTOR_BYTES);\n"
 assert s.count(a) == 1
 open(p, "w").write(s.replace(a, "    int rc = (int)(vlba & 0u);   /* logcheck mutation: the stitch is never written */\n"))
 MUT_EOF

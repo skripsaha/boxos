@@ -141,7 +141,7 @@ roomback_wait_on() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/settle/binder.c"
 s = open(p).read()
-a = "bool BinderRoomWait(void)\n{\n"
+a = "bool BinderRoomWait(TagFSVolume* vol)\n{\n"
 assert s.count(a) == 1, "roombackmut anchor missing"
 s = s.replace(a, a + "    return false;   /* logcheck mutation: a write short of room waits on no Tally */\n", 1)
 open(p, "w").write(s)

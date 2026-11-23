@@ -330,7 +330,7 @@ LATEARRIVAL_MARK="logcheck mutation: the internal disk is not this machine's"
 # that left (volume_ground_on) — and the mutation used to stand there too:
 # every return was judged against the internal disk, a medium that never left,
 # the stick sitting in seat 1. The kernel now judges only a
-# seat taken after the book opened (tagfs.c, g_book_seatings), and the
+# seat taken after the book opened (tagfs.c, mount.book_seatings), and the
 # internal disk was seated at boot, so that half of the mutation is gone: a
 # return judged against the disk is the kernel's defect again, and red.
 latearrival_on() {
@@ -2993,10 +2993,10 @@ run_holdground() {
 #
 # ‼ AND IT IS ASKED AGAIN WHEN THE SEAT SAYS IT ANSWERS AGAIN, NOT ON A CLOCK.
 # The refusal is a read the medium refused, so the machine owes the mount until
-# `seat:ready` names its seat (tagfs.c, the note over g_mount_owed). A seat
+# `seat:ready` names its seat (tagfs.c, the note over mount.mount_owed). A seat
 # rings that on the first command it answers after a refusal — and while the
 # mount is owed nobody sends it one. So the machine resets the seat ONCE, by
-# its driver's own recovery (tagfs.c, the note over g_reset_seating): here the
+# its driver's own recovery (tagfs.c, the note over mount.reset_seating): here the
 # stick's transport reset, whose bell the mount is asked again on. A key that
 # said seat:ready for the stick two seconds after the refusal stood here until
 # the machine could make the event itself; it is gone. A machine that asked
@@ -9494,8 +9494,8 @@ lockrank_bare() {
 # may grow (lock_rank.h: while a leaf is held, no other TagFS lock is taken).
 lockrank_dogear_leaf() {
     grep -q 'TAGFS_LOCK_INIT("dogear", LOCK_RANK_LEAF)' "$1" &&
-        awk '/TagFSLockTake\(&s_lock\)/ { held = 1; next }
-             /TagFSLockDrop\(&s_lock\)/ { held = 0; next }
+        awk '/TagFSLockTake\(&vol->dog_ear\.lock\)/ { held = 1; next }
+             /TagFSLockDrop\(&vol->dog_ear\.lock\)/ { held = 0; next }
              held && /TagFSLockTake\(/   { under = 1 }
              END                         { exit under }' "$1"
 }
@@ -9573,7 +9573,7 @@ EOF
     chk $? "lockrankmut: DogEar's lock is declared a leaf, and dog_ear.c takes no TagFS lock while it holds it"
     sed 's/TAGFS_LOCK_INIT("dogear", LOCK_RANK_LEAF)/TAGFS_LOCK_INIT("dogear", LOCK_RANK_STATE)/' \
         src/kernel/tagfs/settle/dog_ear.c >"$SCRATCH/lockrankmut.dog_ear_state.c"
-    awk '{ print } /TagFSLockTake\(&s_lock\)/ && !done { print "    TagFSLockTake(&tagfs_get_state()->lock);"; done = 1 }' \
+    awk '{ print } /TagFSLockTake\(&vol->dog_ear\.lock\)/ && !done { print "    TagFSLockTake(&vol->state.lock);"; done = 1 }' \
         src/kernel/tagfs/settle/dog_ear.c >"$SCRATCH/lockrankmut.dog_ear_under.c"
     ! lockrank_dogear_leaf "$SCRATCH/lockrankmut.dog_ear_state.c" &&
         ! lockrank_dogear_leaf "$SCRATCH/lockrankmut.dog_ear_under.c"
