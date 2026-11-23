@@ -125,6 +125,7 @@ static int volumes_laid(const uint8_t *records, size_t bytes, uint32_t count, Vo
         memcpy(&list[i].Files, r + 40, 8);
         memcpy(&name_len, r + 48, 2);
         memcpy(&medium_len, r + 50, 2);
+        memcpy(&list[i].Unwritten, r + 52, 8);
         list[i].Home      = (flags & STORAGE_VOLUME_HOME) != 0;
         list[i].Mounted   = (flags & STORAGE_VOLUME_MOUNTED) != 0;
         list[i].ReadOnly  = (flags & STORAGE_VOLUME_READ_ONLY) != 0;
@@ -227,6 +228,84 @@ size_t volume_shown(const VolumeListed *v, char *out, size_t room)
                                   : snprintf(out, room, "%s", medium);
     if (n < 0) { out[0] = '\0'; return 0; }
     return (size_t)n < room ? (size_t)n : room - 1u;
+}
+
+size_t name_begins(const char *text, const char *name)
+{
+    if (!text || !name) return 0;
+    size_t n = 0;
+    for (; name[n]; n++) {
+        char a = text[n], b = name[n];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+        if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+        if (a != b) return 0;
+    }
+    return n && (text[n] == ' ' || text[n] == '\0') ? n : 0;
+}
+
+int volume_named(const char **text, uint32_t *number)
+{
+    if (!text || !*text || !number) return -ERR_INVALID_ARGUMENT;
+    VolumeListed *volumes = NULL;
+    size_t        count   = 0;
+    int           rc      = volume_list(&volumes, &count);
+    if (rc != 0) return rc;
+    size_t best = 0;
+    int    called = 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t n = name_begins(*text, volumes[i].Name);
+        if (n > best) {
+            best   = n;
+            called = 0;
+        }
+        if (n && n == best && called++ == 0) *number = volumes[i].Number;
+    }
+    if (!best) {
+        const char *at = *text;
+        uint32_t    v  = 0;
+        while (*at >= '0' && *at <= '9' && v <= 0x7FFFu) v = v * 10u + (uint32_t)(*at++ - '0');
+        if (at != *text && (*at == ' ' || *at == '\0'))
+            for (size_t i = 0; i < count; i++)
+                if (volumes[i].Number == v) {
+                    *number = v;
+                    best    = (size_t)(at - *text);
+                    called  = 1;
+                }
+    }
+    free(volumes);
+    if (called) {
+        *text += best;
+        while (**text == ' ') (*text)++;
+    }
+    return called;
+}
+
+int volumes_away(const file_id_t *ids, size_t count, size_t *lying, char *out, size_t room)
+{
+    if (lying) *lying = 0;
+    if (out && room) out[0] = '\0';
+    VolumeListed *volumes = NULL;
+    size_t        listed  = 0;
+    int           rc      = volume_list(&volumes, &listed);
+    if (rc != 0) return rc;
+    int    away = 0;
+    size_t at   = 0;
+    for (size_t i = 0; i < listed; i++) {
+        if (!volumes[i].Away) continue;
+        size_t on = 0;
+        for (size_t f = 0; ids && f < count; f++) on += volume_of(ids[f]) == volumes[i].Number;
+        if (ids && !on) continue;
+        if (lying) *lying += on;
+        if (out && room > at + 1u) {
+            char shown[STORAGE_VOLUME_NAME_MOST + 64];
+            volume_shown(&volumes[i], shown, sizeof(shown));
+            int n = snprintf(out + at, room - at, "%s%s", away ? ", " : "", shown);
+            if (n > 0) at = at + (size_t)n < room ? at + (size_t)n : room - 1u;
+        }
+        away++;
+    }
+    free(volumes);
+    return away;
 }
 
 /* One carry of the storage deck (STORAGE_OBJ_COPY or _MOVE): its answer, and
@@ -627,6 +706,7 @@ static int word_all(TagsOf whose, const char *word, uint32_t on, file_id_t **out
     if (worn_count < 0) return worn_count;
     file_id_t *called = NULL;
     int called_count = ask_all(&by_name, &called);
+    if (called_count == -ERR_DEVICE_NOT_READY && worn_count > 0) called_count = 0;   /* the name lies away; the labels here answer */
     if (called_count < 0) { free(worn); return called_count; }
 
     file_id_t *both = malloc(((size_t)worn_count + (size_t)called_count + 1u) * sizeof(file_id_t));

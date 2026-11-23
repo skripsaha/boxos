@@ -93,14 +93,6 @@ static void AwayRemember(TagFSVolume* vol, bool lied)
                 lied ? ", nor that its medium lied" : "");
 }
 
-/* The changes the book holds: inked, and no cycle settled. */
-static uint64_t AwayUnsettled(TagFSVolume* vol)
-{
-    uint64_t inked   = InkedGen(vol);
-    uint64_t settled = SettledGen(vol);
-    return inked > settled ? inked - settled : 0;
-}
-
 uint64_t AwayDepartures(TagFSVolume* vol)
 {
     return __atomic_load_n(&vol->away.departures, __ATOMIC_ACQUIRE);
@@ -118,9 +110,10 @@ void AwayLeft(TagFSVolume* vol, bool swapped)
     __atomic_add_fetch(&vol->away.departures, 1u, __ATOMIC_ACQ_REL);
     kprintf("[TagFS] volume %u: the medium the volume lives on has %s — its book is held open: %llu "
             "change(s) no cycle settled, and everyone waiting on them, wait for the same volume "
-            "to come back as it was left; every read and write of it is refused until then\n",
+            "to come back as it was left; every read and write of it is refused, and none of its "
+            "files shown, until then\n",
             TagFSVolumeNumber(vol), swapped ? "been replaced by another one in the same seat" : "left",
-            (unsigned long long)AwayUnsettled(vol));
+            (unsigned long long)InkUnsettled(vol));
 }
 
 /* A book taken up (perambulation.h): said with what was found, and the
@@ -140,7 +133,7 @@ static void AwayBookTakenUp(TagFSVolume* vol, uint8_t seat)
             "none lost%s\n",
             TagFSVolumeNumber(vol), seat, BoardroomSeatName(seat), last, (unsigned long long)p->slot,
             (unsigned long long)p->proved,
-            (unsigned long long)AwayUnsettled(vol),
+            (unsigned long long)InkUnsettled(vol),
             p->tried ? "; its own stitch cut short lies past the last, and the next goes on past it (M-6)" : "");
     ErrataAsk(vol);
 }
@@ -157,7 +150,7 @@ void AwayTakeUp(TagFSVolume* vol, uint8_t seat)
 
 uint64_t AwayGiveUp(TagFSVolume* vol, AwayVerdict why, uint8_t seat)
 {
-    uint64_t lost = AwayUnsettled(vol);
+    uint64_t lost = InkUnsettled(vol);
     bool     lied = why == AWAY_OTHER && PerambulationLast(vol)->lied;
     AwayRemember(vol, lied);
     switch (why) {

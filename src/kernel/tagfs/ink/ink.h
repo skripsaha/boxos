@@ -237,6 +237,9 @@ error_t InkVolumeBegins(TagFSVolume* vol);
  * holds — the one a cycle's first flush must be issued past. */
 uint64_t InkedGen(TagFSVolume* vol);
 uint64_t InkDataNeed(TagFSVolume* vol);
+/* The changes inked that no cycle settled yet: what a medium that leaves or
+ * refuses writes has not been given. */
+uint64_t InkUnsettled(TagFSVolume* vol);
 
 /* The Ink that laid file `fid`'s newest record — every change the file has had
  * is in it — or the newest Ink of all for a file no longer in the map, whose

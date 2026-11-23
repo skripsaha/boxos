@@ -1439,7 +1439,9 @@ static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext
  *             (the program's own name included, as its first word). A crate
  *             that is only a name, no NUL, starts the program with no luggage.
  *   params (optional): caller-tag augment (comma-list); child = file-tags ∪ augment
- *   out_crate (optional): u32 new_pid, or {u32 pid, u32 generation} */
+ *   out_crate (optional): u32 new_pid, or {u32 pid, u32 generation}
+ *   A name no volume that answers files a program under is ERR_FILE_NOT_FOUND,
+ *   ERR_DEVICE_NOT_READY when it lies on an away volume (TagFSAwayCalled). */
 static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -1521,7 +1523,7 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     TagFSPage         page;
     uint64_t          found_id   = 0;
     for (TagFSVolume *vol = TagFSVolumeNext(NULL); vol && found_id == 0; vol = TagFSVolumeNext(vol)) {
-        if (!TagFSVolumeMounted(vol))
+        if (TagFSVolumeReady(vol) != OK)
             continue;
         uint64_t from = 1;
         do {
@@ -1537,7 +1539,7 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
         } while (found_id == 0 && from != 0);
     }
 
-    if (found_id == 0) return ERR_FILE_NOT_FOUND;
+    if (found_id == 0) return TagFSAwayCalled(name, name_len) ? ERR_DEVICE_NOT_READY : ERR_FILE_NOT_FOUND;
     return SysProcExecFound(op, crates, ctx, found_id, augment, aug_len, luggage, luggage_len);
 }
 

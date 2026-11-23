@@ -1,4 +1,5 @@
 #include "box/disk.h"
+#include "box/file.h"
 #include "box/memory.h"
 #include "box/string.h"
 #include "box/core/manifest.h"
@@ -146,6 +147,47 @@ int disk_list(DiskListed **out, size_t *count)
         if (rc == 0) *count = delivered;
         return rc;
     }
+}
+
+size_t disk_named(const char **text, const DiskListed *disks, size_t count, const DiskListed **out)
+{
+    if (!text || !*text || !out) return 0;
+    VolumeListed *volumes      = NULL;
+    size_t        volume_count = 0;
+    if (volume_list(&volumes, &volume_count) != 0) volume_count = 0;
+    size_t best = 0, called = 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t n = name_begins(*text, disks[i].Name);
+        for (size_t p = 0; p < disks[i].PartCount; p++)
+            for (size_t v = 0; v < volume_count; v++)
+                if (disks[i].Parts[p].Volume == volumes[v].Number + 1u) {
+                    size_t m = name_begins(*text, volumes[v].Name);
+                    n        = m > n ? m : n;
+                }
+        if (n > best) {
+            best   = n;
+            called = 0;
+        }
+        if (n && n == best && called++ == 0) *out = &disks[i];
+    }
+    free(volumes);
+    if (!best) {
+        const char *at   = *text;
+        uint32_t    seat = 0;
+        while (*at >= '0' && *at <= '9' && seat <= 0xFFu) seat = seat * 10u + (uint32_t)(*at++ - '0');
+        if (at != *text && (*at == ' ' || *at == '\0'))
+            for (size_t i = 0; i < count; i++)
+                if (disks[i].Seat == seat) {
+                    *out   = &disks[i];
+                    best   = (size_t)(at - *text);
+                    called = 1;
+                }
+    }
+    if (called) {
+        *text += best;
+        while (**text == ' ') (*text)++;
+    }
+    return called;
 }
 
 /* One change of a disk's table: [u8 seat][u32 seating], then `more`. */

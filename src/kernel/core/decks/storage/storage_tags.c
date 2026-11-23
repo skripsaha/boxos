@@ -320,6 +320,8 @@ int ObjGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
     uint64_t     own     = 0;
     TagFSVolume *vol     = TagFSVolumeOfId(file_id, &own);
     if (!vol) return ERR_FILE_NOT_FOUND;
+    error_t ready = TagFSVolumeReady(vol);
+    if (ready != OK) return ready;
 
     TagOwner     owner;
     TagView      view;
@@ -616,11 +618,11 @@ error_t StorageAnswerPages(StoragePager pager, const void *ask, TagFSVolume *onl
     uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
     uint64_t own      = from & TAGFS_VOLUME_FILES_MOST;
     uint32_t start    = (uint32_t)(from >> TAGFS_VOLUME_FILE_BITS);
-    error_t  rc       = OK;
+    error_t  rc       = only && TagFSVolumeReady(only) == ERR_DEVICE_NOT_READY ? ERR_DEVICE_NOT_READY : OK;
     for (TagFSVolume *vol = only ? only : TagFSVolumeNext(NULL); vol && rc == OK;
          vol = only ? NULL : TagFSVolumeNext(vol)) {
         uint32_t number = TagFSVolumeNumber(vol);
-        if (number < start || !TagFSVolumeMounted(vol))
+        if (number < start || TagFSVolumeReady(vol) != OK)
             continue;
         rc = StorageVolumePages(pager, ask, vol, number == start && own ? own : 1, out, ctx, piece, piece_room,
                                 most, hdr);
@@ -788,7 +790,10 @@ int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, const Op
  *                     take, DELETED; a name is no one's, `whose` the owner of
  *                     the tags asked beside it. in_crate: the word, its bytes whole, and
  *                     after a NUL the tags the files must wear too.
- *                     out_crate: as STORAGE_TAG_QUERY's. */
+ *                     out_crate: as STORAGE_TAG_QUERY's. A word no volume
+ *                     that answers has a file called, and a volume whose
+ *                     medium left has, is ERR_DEVICE_NOT_READY: it is
+ *                     somebody's — on a medium out of the machine. */
 int ObjNameQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
 {
     (void)crate_count;
@@ -852,6 +857,8 @@ int ObjNameQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, cons
     uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
     rc = storage_query_into(owner, where, only, tags, total, without, without_count, false, text, word_len, out, ctx,
                             hdr);
+    if (rc == OK && hdr[1] == 0 && !only && TagFSAwayCalled(text, word_len))
+        rc = ERR_DEVICE_NOT_READY;
     kfree(tags);
     kfree(without);
     UseListDrop(use);
@@ -956,7 +963,7 @@ int ObjTagList(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
     bool     full          = false;
     for (TagFSVolume *vol = TagFSVolumeNext(NULL); vol && rc == OK && !full; vol = TagFSVolumeNext(vol)) {
         uint32_t number = TagFSVolumeNumber(vol);
-        if (number < start || !TagFSVolumeMounted(vol))
+        if (number < start || TagFSVolumeReady(vol) != OK)
             continue;
         TagView   view;
         uint64_t *shown    = NULL;

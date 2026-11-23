@@ -4,6 +4,7 @@
 #include "logbook.h"
 #include "../deed/deed.h"
 #include "../settle/settle.h"
+#include "../ink/ink.h"
 #include "volume_lay.h"
 
 /*
@@ -56,6 +57,13 @@ bool TagFSVolumeMounted(const TagFSVolume* vol)
     return vol->state.initialized;
 }
 
+error_t TagFSVolumeReady(TagFSVolume* vol)
+{
+    if (!vol->state.initialized)
+        return ERR_TAGFS_NOT_INITIALIZED;
+    return TagFSMediumLeft(vol) ? ERR_DEVICE_NOT_READY : OK;
+}
+
 void TagFSVolumeUuid(const TagFSVolume* vol, uint8_t out[16])
 {
     if (vol->mount.uuid_known)
@@ -86,6 +94,7 @@ void TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out)
     out->read_only = TagFSIsUnderGlass(vol) || TagFSReadOnly(vol);
     out->bytes     = vol->state.volume_bytes;
     out->files     = vol->state.total_files;
+    out->unwritten = InkUnsettled(vol);
     if (BlockMapDerivedUp(vol))
         out->free_bytes = AllotmentFreeUnpromised(vol) * (uint64_t)VOLUME_BLOCK_BYTES;
     tagfs_leave(vol);

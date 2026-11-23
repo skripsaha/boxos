@@ -164,12 +164,13 @@ typedef struct {
     bool        Home;       /* the volume the machine was booted from */
     bool        Mounted;    /* its files are found; the numbers below are its */
     bool        ReadOnly;   /* it takes no change */
-    bool        Away;       /* its medium left, and the volume waits for it */
+    bool        Away;       /* its medium left: the volume waits for it, its files shown by nothing */
     bool        Removable;  /* on a removable medium */
     uint8_t     Uuid[16];
     uint64_t    Bytes;
     uint64_t    FreeBytes;
     uint64_t    Files;
+    uint64_t    Unwritten;  /* its changes no cycle settled yet: an away one's wait for its medium here */
     const char *Name;       /* the name a person gave it, "" when nobody has */
     const char *Medium;     /* what its medium calls itself */
 } VolumeListed;
@@ -181,6 +182,25 @@ int volume_info(uint32_t number, VolumeListed **out);
  * counts them, in thousands ("32 GB"). The bytes written. */
 size_t volume_shown(const VolumeListed *v, char *out, size_t room);
 size_t size_shown(uint64_t bytes, char *out, size_t room);
+/* How many bytes of `text` the name `name` is when the text begins with it —
+ * ASCII letters in either case — and a space or its end comes next; 0 when it
+ * does not, or the name is empty. How a thing a person names in a command is
+ * told by its name (volume_named, disk_named). */
+size_t name_begins(const char *text, const char *name);
+/* The volume a person names at the front of `text`: by the name they gave it
+ * — the longest of the house's the text begins with (name_begins) — or by its
+ * number. *text moved past it and the spaces after it, *number the volume's.
+ * How many volumes are called so: 1; 0 for none, nor one of that number; more
+ * when several share the name — *number the first, and the person is to say
+ * which by its number. A negative -error_t when the house would not list its
+ * volumes. */
+int volume_named(const char **text, uint32_t *number);
+/* The volumes of the house whose medium is out of the machine (Away) — with
+ * `ids`, only the ones those `count` files lie on, *lying (NULL when not
+ * wanted) how many of the files do — as a person calls them, joined by ", "
+ * into `out` (`room` bytes, NUL-ended): how many such volumes there are, or a
+ * negative -error_t when the house would not list them. */
+int volumes_away(const file_id_t *ids, size_t count, size_t *lying, char *out, size_t room);
 /* The name a person gives the volume numbered `number` — UTF-8 of any
  * language, at most STORAGE_VOLUME_NAME_MOST bytes, no control character;
  * NULL or "" takes it away. Kept in the volume's book, it goes with the
@@ -250,7 +270,9 @@ int query_name_all_everywhere(TagsOf whose, const char* word, const char* tags, 
  * those that are called it — a search looks at both the labels and the name,
  * so `slot3` finds the file tagged slot3 and slot3.sav alike. Inside the Use
  * Context; each file once, in file id order; the count and a malloc'd list the
- * caller frees (NULL for none), or a negative -error_t. */
+ * caller frees (NULL for none), or a negative -error_t — -ERR_DEVICE_NOT_READY
+ * when nothing here answers and a file called the word lies on a volume out
+ * of the machine (VolumeListed.Away). */
 int query_word_all(TagsOf whose, const char* word, file_id_t** out_ids);
 /* The files that begin with `length` bytes at `bytes` (1 to FILE_HEAD_MOST) —
  * the box magic, a font's tag, "itinerary 1\n" — each in file id order, the
@@ -260,7 +282,8 @@ int query_word_all(TagsOf whose, const char* word, file_id_t** out_ids);
 int files_starting_with(const void* bytes, size_t length, file_id_t** out_ids);
 /* The same questions asked of the volume numbered `volume` (VolumeListed)
  * alone — a search narrowed to one volume of the house; the ones above ask
- * every volume. -ERR_OBJECT_NOT_FOUND for a number the house gave none. */
+ * every volume. -ERR_OBJECT_NOT_FOUND for a number the house gave none,
+ * -ERR_DEVICE_NOT_READY for a volume out of the machine. */
 int query_all_on(uint32_t volume, TagsOf whose, const char* tags, const char* without, file_id_t** out_ids);
 int query_word_all_on(uint32_t volume, TagsOf whose, const char* word, file_id_t** out_ids);
 int files_starting_with_on(uint32_t volume, const void* bytes, size_t length, file_id_t** out_ids);

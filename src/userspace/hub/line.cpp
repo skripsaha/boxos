@@ -15,6 +15,7 @@
 #include "nearest.h"
 #include "programs.h"
 #include "say.h"
+#include "volume.h"
 #include "words.h"
 
 namespace hub {
@@ -34,10 +35,14 @@ bool RunProgram(Hub &Self, const Words &Cut)
                                                : launch::Program(Self, *Program, Name, Cut.Tail(1));
     if (Program.error() == programs::Said) return false;
 
-    // Which of the two things happened is said: a name nobody has, or a
-    // program that is there and would not start — its medium gone, most
-    // often, which the person must not be told is a command that does not
-    // exist.
+    // Which of the three things happened is said: a name nobody has, a name
+    // that lies on a medium out of the machine, or a program that is there
+    // and would not start — none of which the person must be told is a
+    // command that does not exist.
+    if (box_errno_of(Program.error()) == ERR_DEVICE_NOT_READY) {
+        SayIn(Self.Shown.RefusalColor, "{} lies {} to start it\n", Name, volume::AwaySaid());
+        return false;
+    }
     if (box_errno_of(Program.error()) != ERR_FILE_NOT_FOUND) {
         SayIn(Self.Shown.RefusalColor, "{}: is there and would not start\n", Name);
         return false;

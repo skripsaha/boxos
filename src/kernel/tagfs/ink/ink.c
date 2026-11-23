@@ -20,6 +20,13 @@ uint64_t InkedGen(TagFSVolume* vol)
     return __atomic_load_n(&vol->ink.inked_gen, __ATOMIC_ACQUIRE);
 }
 
+uint64_t InkUnsettled(TagFSVolume* vol)
+{
+    uint64_t inked   = InkedGen(vol);
+    uint64_t settled = SettledGen(vol);
+    return inked > settled ? inked - settled : 0;
+}
+
 uint64_t InkDataNeed(TagFSVolume* vol)
 {
     return vol->ink.data_need;
@@ -113,7 +120,7 @@ void TagFSWriteRefused(TagFSVolume* vol)
     kprintf("[TagFS] the medium under the volume refuses writes as protected — the volume "
             "takes no change from here on (ERR_TAGFS_READ_ONLY), and %llu change(s) no cycle "
             "settled stay unwritten\n",
-            (unsigned long long)(InkedGen(vol) - SettledGen(vol)));
+            (unsigned long long)InkUnsettled(vol));
     SettleKnock();
 }
 

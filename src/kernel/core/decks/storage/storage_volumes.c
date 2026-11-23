@@ -38,7 +38,8 @@ static void VolumeSaidOf(TagFSVolume *vol, VolumeSaid *v)
 }
 
 /* One volume's record ([u32 number][u32 flags][u8 uuid[16]][u64 bytes]
- * [u64 free][u64 files][u16 name_len][u16 medium_len][name][medium]) laid at
+ * [u64 free][u64 files][u16 name_len][u16 medium_len][u64 unwritten][name]
+ * [medium]) laid at
  * kp + pos, or only measured with kp NULL: the position past it. */
 static uint64_t VolumeRecord(uint8_t *kp, uint64_t pos, const VolumeSaid *v)
 {
@@ -57,6 +58,7 @@ static uint64_t VolumeRecord(uint8_t *kp, uint64_t pos, const VolumeSaid *v)
         memcpy(kp + pos + 40, &f->files, 8);
         memcpy(kp + pos + 48, &name_len, 2);
         memcpy(kp + pos + 50, &medium_len, 2);
+        memcpy(kp + pos + 52, &f->unwritten, 8);
         memcpy(kp + pos + STORAGE_VOLUME_LISTED_HEAD, v->name, name_len);
         memcpy(kp + pos + STORAGE_VOLUME_LISTED_HEAD + name_len, f->medium, medium_len);
     }
@@ -150,6 +152,7 @@ static int ObjCarry(const ManifestOp *op, Crate *crates, const OpContext *ctx, b
     if (!StoragePersonSays(ctx, true)) return ERR_ACCESS_DENIED;
     TagFSVolume *to = TagFSVolumeNumbered(param_u32(op, 0));
     if (!to) return ERR_OBJECT_NOT_FOUND;
+    if (TagFSVolumeReady(to) == ERR_DEVICE_NOT_READY) return ERR_DEVICE_NOT_READY;
     const Crate *in    = &crates[op->in_crate];
     uint64_t     count = in->size / 8u;
     if (!count || in->size % 8u || count > UINT32_MAX) return ERR_INVALID_ARGUMENT;
@@ -201,6 +204,7 @@ int ObjShipped(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
     if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
     TagFSVolume *vol = TagFSVolumeNumbered(param_u32(op, 0));
     if (!vol) return ERR_OBJECT_NOT_FOUND;
+    if (TagFSVolumeReady(vol) == ERR_DEVICE_NOT_READY) return ERR_DEVICE_NOT_READY;
 
     uint32_t  room = (uint32_t)((out->capacity - 8u) / 8u);
     uint64_t *ids  = room ? kmalloc(8u * (uint64_t)room) : NULL;

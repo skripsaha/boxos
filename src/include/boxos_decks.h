@@ -374,7 +374,8 @@
  * there: it may have been deleted since; then what the system keeps the file
  * as, 0 an ordinary file, 1 a system file, 2 a boot file, 3 the kernel; and
  * the file's first bytes, as storage.head.query asks them, head_len of them
- * (0 to STORAGE_HEAD_MOST). */
+ * (0 to STORAGE_HEAD_MOST). A file of an away volume is ERR_DEVICE_NOT_READY
+ * (STORAGE_VOLUME_AWAY): nothing of its is shown until its medium is back. */
 #define STORAGE_OBJ_GET_INFO        0x09
 /* obj.span — a file made exactly `size` bytes long. params =
  * [u64 file_id][u64 size][u32 flags], the flags word optional (0). Shorter:
@@ -483,7 +484,9 @@
  * NUL — a comma list of `whose`'s tags the files called so must wear too; an empty word
  * is refused ERR_INVALID_ARGUMENT.
  * out_crate = [u32 delivered][u32 total][u64 file_ids[delivered]] in file id
- * order, as tag.query's. */
+ * order, as tag.query's. A word no volume that answers has a file called, and
+ * an away volume has, is ERR_DEVICE_NOT_READY: it lies on a medium out of the
+ * machine (STORAGE_VOLUME_AWAY). */
 #define STORAGE_NAME_QUERY          0x27
 
 /* tag.show — a program's own tags shown to another program: params = [u8 act]
@@ -538,10 +541,12 @@
  * (STORAGE_VOLUME_FILE_SHIFT). No params. out_crate = [u32 delivered]
  * [u32 total], then `delivered` records [u32 number][u32 flags (STORAGE_
  * VOLUME_*)][u8 uuid[16]][u64 bytes][u64 free bytes][u64 files][u16 name_len]
- * [u16 medium_len][name][medium] while they fit, in the order of the numbers:
- * the size, the free bytes and the files of a volume that is mounted, 0 of one
- * that is not; `name` the one a person gave the volume, none when nobody
- * has; `medium` what the medium it is on calls itself. */
+ * [u16 medium_len][u64 unwritten][name][medium] while they fit, in the order
+ * of the numbers: the size, the free bytes and the files of a volume that is
+ * mounted, 0 of one that is not; `unwritten` its changes no cycle settled yet
+ * — what an away volume's book holds for its return, and the medium is not to
+ * be written anywhere else before; `name` the one a person gave the volume,
+ * none when nobody has; `medium` what the medium it is on calls itself. */
 #define STORAGE_VOLUME_LIST         0x2B
 /* volume.info — one volume of the house: params = [u32 number]; out_crate =
  * one record as volume.list's. ERR_OBJECT_NOT_FOUND for a number the house
@@ -577,7 +582,8 @@
  * carried; ERR_FILE_NOT_FOUND for an id of no file, ERR_INVALID_ARGUMENT for
  * one on that volume already, ERR_OBJECT_NOT_FOUND for a volume the house has
  * not, ERR_PERMISSION_DENIED for a file the system keeps (a volume's maker
- * lays those), ERR_DEVICE_NOT_READY when a medium left on the way. A copy cut
+ * lays those), ERR_DEVICE_NOT_READY for a file or a volume whose medium is
+ * out of the machine, or a medium that left on the way. A copy cut
  * short is never taken for the file: the volume lets it go. */
 #define STORAGE_OBJ_COPY            0x2E
 #define STORAGE_OBJ_MOVE            0x2F
@@ -606,13 +612,13 @@
  * out_crate = [u32 delivered][u32 total][u64 ids[delivered]] in file id order,
  * each as the house names it, as storage.query's. Every program may ask, as a
  * file's name and size are anybody's to see. ERR_OBJECT_NOT_FOUND for a
- * number the house gave none. */
+ * number the house gave none, ERR_DEVICE_NOT_READY for an away volume. */
 #define STORAGE_SHIPPED             0x31
-#define STORAGE_VOLUME_LISTED_HEAD  52u     /* a record before its name */
+#define STORAGE_VOLUME_LISTED_HEAD  60u     /* a record before its name */
 #define STORAGE_VOLUME_HOME         0x01u   /* flags: the volume the machine was booted from */
 #define STORAGE_VOLUME_MOUNTED      0x02u   /* its book is read and its files are found */
 #define STORAGE_VOLUME_READ_ONLY    0x04u   /* it takes no change: under glass, or its medium refuses writes */
-#define STORAGE_VOLUME_AWAY         0x08u   /* its medium left; its book is held open for its return */
+#define STORAGE_VOLUME_AWAY         0x08u   /* its medium left; its book is held for its return, its files shown by nothing */
 #define STORAGE_VOLUME_REMOVABLE    0x10u   /* its medium is a removable one */
 #define STORAGE_VOLUME_FILE_SHIFT   48u     /* a file id's volume number begins at this bit */
 #define STORAGE_SHOWN_TO_ME         0

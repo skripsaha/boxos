@@ -34,8 +34,10 @@ TagFSVolume* TagFSVolumeOfUuid(const uint8_t uuid[16]);
  * whether it is the home volume, mounted, taking no change — under glass, or
  * its medium refusing writes —, away — its medium left, its book held open
  * (mount/away.h) —, on a removable medium; the sixteen bytes it calls itself;
- * while mounted how many bytes it is, how many of them no file holds, and
- * how many files it has; and its medium's own name, NUL-ended. */
+ * while mounted how many bytes it is, how many of them no file holds, how
+ * many files it has, and how many of its changes no cycle settled yet — the
+ * changes an away volume's book holds for its return; and its medium's own
+ * name, NUL-ended. */
 typedef struct {
     uint32_t number;
     bool     home;
@@ -47,6 +49,7 @@ typedef struct {
     uint64_t bytes;
     uint64_t free_bytes;
     uint64_t files;
+    uint64_t unwritten;
     char     medium[48];
 } TagFSVolumeFacts;
 void         TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out);
@@ -579,6 +582,14 @@ void     TagFSNoteMediumGone(TagFSVolume* vol);
 bool     TagFSMediumLeft(TagFSVolume* vol);
 bool     TagFSMediumGone(TagFSVolume* vol);
 
+/* Whether `vol` answers what it holds (volume/house.c). OK: mounted, and its
+ * medium in the machine. ERR_DEVICE_NOT_READY: its medium left and its book is
+ * held for its return (mount/away.h) — till then none of its files is shown:
+ * every question of which files there are passes it by, one asked of it alone
+ * is refused, and so is a look at one of its files. ERR_TAGFS_NOT_INITIALIZED:
+ * not mounted. */
+error_t  TagFSVolumeReady(TagFSVolume* vol);
+
 /* Whether the mounted volume takes no write: its medium refused one as
  * protected (RT-18) — DATA PROTECT on USB, an ATA abort on AHCI — or the
  * volume stands under glass (TagFSIsUnderGlass). From then on no Ink changes
@@ -757,6 +768,11 @@ error_t  TagFSStartingWithPage(TagFSVolume* vol, const uint8_t* bytes, uint32_t 
  * words there are: 2, 1 for a name with no stem (`kernel`, `.profile`), 0 for
  * a name of no bytes. Every word starts at `name`. */
 uint32_t TagFSNameWords(const char* name, size_t length, size_t lengths[2]);
+/* Whether the live files called `word` (as TagFSNamedPage meets them, in no
+ * one's tags) lie on volumes whose medium left alone: a name no volume that
+ * answers has a file called is not nobody's when one lies on a medium out of
+ * the machine. */
+bool     TagFSAwayCalled(const char* word, size_t length);
 /*
  * The tags of `view` files wear, a page at a time and in the order of their
  * numbers (query/query.c): from the tag numbered `from` on, every tag `view`

@@ -367,6 +367,24 @@ error_t TagFSNamedPage(TagFSVolume* vol, TagOwner owner, const char* word, size_
     return rc;
 }
 
+bool TagFSAwayCalled(const char* word, size_t length)
+{
+    bool away = false;
+    for (TagFSVolume* vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol)) {
+        uint64_t  id;
+        TagFSPage page;
+        error_t   ready = TagFSVolumeReady(vol);
+        if (ready == ERR_TAGFS_NOT_INITIALIZED ||
+            TagFSNamedPage(vol, TagOwnerPerson(), word, length, NULL, 0, NULL, 0, 1, &id, 1, false, &page) != OK ||
+            !page.delivered)
+            continue;
+        if (ready == OK)
+            return false;
+        away = true;
+    }
+    return away;
+}
+
 // ----------------------------------------------------------------------------
 // The files that begin with given bytes
 // ----------------------------------------------------------------------------

@@ -345,12 +345,13 @@ int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count, const O
 int ObjEscheat(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
 {
     (void)crate_count;
-    /* Every mounted volume's book: what each lets go, summed; nothing to let
-     * go anywhere is ERR_OBJECT_NOT_FOUND, and another refusal the first. */
+    /* Every book of a volume that answers: what each lets go, summed; nothing
+     * to let go anywhere is ERR_OBJECT_NOT_FOUND, and another refusal the
+     * first. An away volume's book is held as it was for its return. */
     EscheatSaid all  = { 0 };
     error_t     rc   = ERR_OBJECT_NOT_FOUND;
     for (TagFSVolume *vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol)) {
-        if (!TagFSVolumeMounted(vol))
+        if (TagFSVolumeReady(vol) != OK)
             continue;
         EscheatSaid said;
         error_t     one = TagFSEscheat(vol, StorageCallWarrant(ctx), &said);
@@ -503,9 +504,10 @@ int SettleCarried(TagFSVolume *to, const uint64_t *ids, uint32_t count, bool mov
         return ERR_NO_MEMORY;
     memset(call, 0, sizeof(CarryCall) + sizeof(CarryItem) * count);
     for (uint32_t i = 0; i < count; i++) {
-        call->items[i].from = TagFSVolumeOfId(ids[i], &call->items[i].fid);
-        if (!call->items[i].from || call->items[i].from == to) {
-            error_t rc = call->items[i].from ? ERR_INVALID_ARGUMENT : ERR_FILE_NOT_FOUND;
+        TagFSVolume* from = TagFSVolumeOfId(ids[i], &call->items[i].fid);
+        call->items[i].from = from;
+        if (!from || from == to || TagFSVolumeReady(from) == ERR_DEVICE_NOT_READY) {
+            error_t rc = !from ? ERR_FILE_NOT_FOUND : from == to ? ERR_INVALID_ARGUMENT : ERR_DEVICE_NOT_READY;
             kfree(call);
             return rc;
         }

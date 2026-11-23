@@ -179,6 +179,10 @@ Picked PickThing(Hub &Self, std::string_view Thing)
         Found.assign(Self.Given.Files().begin(), Self.Given.Files().end());
     } else {
         int Count = FindThing(Thing, Found);
+        if (Count == -ERR_DEVICE_NOT_READY) {
+            Say("run: {} lies {} and say it again\n", Thing, volume::AwaySaid());
+            return std::unexpected(Said);
+        }
         if (Count < 0) {
             Say("run: the volume would not answer for {} ({})\n", Thing, Reason(Count));
             return std::unexpected(Said);

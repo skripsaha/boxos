@@ -73,6 +73,15 @@ typedef struct {
  * free(*out) lets it go. 0, or a negative -error_t. */
 int disk_list(DiskListed **out, size_t *count);
 
+/* The disk a person names at the front of `text`, among the `count` of
+ * `disks`: by what its medium calls itself or the name of a volume of the
+ * house standing on it — the longest the text begins with (name_begins,
+ * box/file.h) — or by its number, the seat it sits in. *text moved past it
+ * and the spaces after it, *out the disk. How many disks are called so: 1; 0
+ * for none, nor one of that number; more when several share the name — *out
+ * the first, and the person is to say which by its number. */
+size_t disk_named(const char **text, const DiskListed *disks, size_t count, const DiskListed **out);
+
 int disk_lay(const DiskListed *disk);
 int disk_add(const DiskListed *disk, uint8_t kind, uint64_t first, uint64_t blocks, uint16_t *entry);
 int disk_remove(const DiskListed *disk, uint16_t entry);

@@ -249,8 +249,8 @@ static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count
     (void)op->params[0];
     error_t first = OK;
     for (TagFSVolume* vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol)) {
-        if (!TagFSVolumeMounted(vol))
-            continue;
+        if (TagFSVolumeReady(vol) != OK)
+            continue;               /* an away volume's changes wait for its medium */
         error_t rc = tagfs_flush_cache(vol);
         if (rc != OK && first == OK)
             first = rc;

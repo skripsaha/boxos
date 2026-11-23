@@ -70,4 +70,12 @@ std::vector<file_id_t> Taken(file_id_t *Ids, int Count)
     return Found;
 }
 
+std::string AwaySaid()
+{
+    char      Where[2 * STORAGE_VOLUME_NAME_MOST + 64];
+    const int Away = volumes_away(nullptr, 0, nullptr, Where, sizeof(Where));
+    if (Away > 1) return std::string("on volumes that are not plugged in (") + Where + ") — plug them in";
+    return std::string("on ") + (Away == 1 ? Where : "a volume") + ", which is not plugged in — plug it in";
+}
+
 }  // namespace hub::volume

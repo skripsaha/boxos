@@ -22,7 +22,9 @@
 
 #include "box/core/form_filler.h"
 #include "box/error.h"
+#include "box/file.h"
 #include "box/memory.h"
+#include "box/print.h"
 #include "box/string.h"
 
 #define NO_ITEM ((size_t)-1)
@@ -37,6 +39,37 @@ static bool usable(const FormItem *item, uint32_t field)
 static int refuse_lookup(BoxFormFiller *filler, const char *name)
 {
     return form_fill_refuse(filler, "the volume would not say what ", name, " is");
+}
+
+/* Where the files of a volume out of the machine lie, as the person is told
+ * it after `subject` (" lies on ..." — the volume, or volumes, `ids` lie on, or
+ * every such volume with none): refused once, the command started for none of
+ * them. 0 when no file of `ids` lies on one. */
+static int refuse_away(BoxFormFiller *filler, const char *subject, const file_id_t *ids, size_t count, bool one)
+{
+    char   where[2u * STORAGE_VOLUME_NAME_MOST + 64u];
+    size_t lying = 0;
+    int    away  = volumes_away(ids, count, &lying, where, sizeof(where));
+    if (away <= 0 || (ids && !lying)) return 0;
+    char said[3u * STORAGE_VOLUME_NAME_MOST + 160u];
+    snprintf(said, sizeof(said), "%s %s on %s%s%s — plug %s in and say it again", subject, one ? "lies" : "lie",
+             away == 1 ? "" : "volumes that are not plugged in (", where,
+             away == 1 ? ", which is not plugged in" : ")", away == 1 ? "it" : "them");
+    return form_fill_refuse(filler, said, NULL, NULL);
+}
+
+/* The files `them`, a field given or `it` hold, refused when any lies on a
+ * volume out of the machine: they, or how many of them. */
+static int refuse_away_given(BoxFormFiller *filler, const FormItem *item)
+{
+    if (item->IdCount == 0) return 0;
+    char   subject[48];
+    size_t lying = 0;
+    if (volumes_away(item->Ids, item->IdCount, &lying, NULL, 0) <= 0 || !lying) return 0;
+    if (item->IdCount == 1) snprintf(subject, sizeof(subject), "it");
+    else if (lying == item->IdCount) snprintf(subject, sizeof(subject), "they");
+    else snprintf(subject, sizeof(subject), "%zu of them", lying);
+    return refuse_away(filler, subject, item->Ids, item->IdCount, item->IdCount == 1 || lying == 1);
 }
 
 static int resolve_ids(FormItem *item, const file_id_t *ids, size_t count)
@@ -65,8 +98,10 @@ static int resolve(BoxFormFiller *filler, FormItem *item)
 
     if (item->Role == FORM_ROLE_THEM || item->Role == FORM_ROLE_IT) {
         if (lookup->ThemKnown) rc = resolve_ids(item, lookup->Them, lookup->ThemCount);
+        if (rc == 0) rc = refuse_away_given(filler, item);
     } else if (given) {
         if (given->Things) rc = resolve_ids(item, given->Ids, given->IdCount);
+        if (rc == 0) rc = refuse_away_given(filler, item);
     } else {
         file_id_t *ids = NULL;
         bool       bounded = false;
@@ -75,7 +110,8 @@ static int resolve(BoxFormFiller *filler, FormItem *item)
                     : lookup->Find(lookup, item->Token.Text, item->Everywhere != 0, &ids);
         if (n < 0) {
             free(ids);
-            return refuse_lookup(filler, item->Token.Text);
+            int away = n == -ERR_DEVICE_NOT_READY ? refuse_away(filler, item->Token.Text, NULL, 0, true) : 0;
+            return away ? away : refuse_lookup(filler, item->Token.Text);
         }
         if (n == 0) free(ids);
         else item->Ids = ids;

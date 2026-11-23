@@ -56,6 +56,12 @@ std::expected<std::string, int> ReadAll(file_id_t File);
 // a refusal), taken into a list and the heap let go of.
 std::vector<file_id_t> Taken(file_id_t *Ids, int Count);
 
+// Where a name that lies on a medium out of the machine is, as the person is
+// told it: "on Flash, which is not plugged in — plug it in", or, with several
+// such volumes, "on volumes that are not plugged in (Flash, Photos) — plug
+// them in" (volumes_away).
+std::string AwaySaid();
+
 }  // namespace hub::volume
 
 #endif
