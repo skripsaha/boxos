@@ -188,6 +188,19 @@ void CargoNameKernel(const char* path) {
     g_kernel_file = path;
 }
 
+/* The files that are no box but the system keeps (--system): each in the
+ * system's role. */
+static const char** g_system_files = NULL;
+static int          g_system_count = 0;
+
+int CargoKeepSystem(const char* path) {
+    const char** grown = realloc(g_system_files, sizeof(char*) * (size_t)(g_system_count + 1));
+    if (!grown) return -1;
+    g_system_files = grown;
+    g_system_files[g_system_count++] = path;
+    return 0;
+}
+
 /* The bytes of the box's part of `kind`, read from the file `filename` when
  * it is a box: its first bytes are a box's, and the table and names hold. A
  * file that is not a box — the kernel, a text, an ELF — or a box without the
@@ -295,6 +308,11 @@ static int RoleOf(const char* filename, uint32_t* role) {
         *role = TALLY_FILE_ROLE_KERNEL;
         return 0;
     }
+    for (int i = 0; i < g_system_count; i++)
+        if (strcmp(filename, g_system_files[i]) == 0) {
+            *role = TALLY_FILE_ROLE_SYSTEM;
+            return 0;
+        }
     BoxRole said;
     if (BoxRoleOf(filename, &said) != 0) return -1;
     *role = said == BOX_ROLE_SYSTEM ? TALLY_FILE_ROLE_SYSTEM : said == BOX_ROLE_BOOT ? TALLY_FILE_ROLE_BOOT : 0;

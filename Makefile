@@ -1006,6 +1006,13 @@ GANGWAY_LOGO   = src/boot/uefi/gangway_logo.asm
 GANGWAY_LOGO_SCENES = $(BUILDDIR)/scenes/dark-still/duppo-word.scene $(BUILDDIR)/scenes/light-still/duppo-word.scene
 GANGWAY_LD     = src/boot/uefi/gangway.ld
 GANGWAY_EFI    = $(BUILDDIR)/BOOTX64.EFI
+# What BoxOS keeps on an ESP and under what names, read out of the one header
+# that owns them (src/include/boxos_esp.h).
+EspName        = $(shell sed -n 's/^\#define $(1)  *"\([^"]*\)".*/\1/p' $(SRCDIR)/include/boxos_esp.h)
+# Gangway as a volume keeps it: the file a volume's maker puts on an ESP, kept
+# in the system's role (create_tagfs --system), so every volume laid carries
+# the loader that boots it.
+GANGWAY_KEPT   = $(BUILDDIR)/$(call EspName,ESP_LOADER_KEPT)
 GANGWAY_SO     = $(BUILDDIR)/gangway.so
 GANGWAY_OBJ    = $(patsubst src/boot/uefi/%.c,$(BUILDDIR)/%.o,$(GANGWAY_SRC))
 GANGWAY_JUMP_OBJ = $(BUILDDIR)/gangway_jump.o
@@ -1651,6 +1658,7 @@ $(TESTBIN_EMPTY):
 # what its box asks for (PACK_ASKS below), so no tag here says either.
 VOLUME_CONTENT = \
 	$(KERNEL_BIN)   "" \
+	$(GANGWAY_KEPT) "boot" \
 	$(DISPLAY_BIN)  "display" \
 	$(HUB_BIN)      "" \
 	$(PROCA_BIN)    "" \
@@ -1893,9 +1901,9 @@ $(call Box,$(1)): $(1) $(PACK_TOOL) $(BOX_SIGN_KEY)
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
-$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(SCENE_FILES) $(TAGFS_TOOL) \
+$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(SCENE_FILES) $(GANGWAY_KEPT) $(TAGFS_TOOL) \
          tools/crossings.py $(SRCDIR)/include/boxos_crossings.h tools/make_mbr.py $(MEDIUM_BLOCK_MARK)
-	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) $(VOLUME_LAID)); \
+	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) --system $(GANGWAY_KEPT) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
 	START=$$(( $(ESP_START_SECTOR) + $$ESP )); \
@@ -1915,7 +1923,7 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	echo "  Laying the crossings in the front (src/include/boxos_crossings.h)..."; \
 	python3 tools/crossings.py lay $@ --block $(MEDIUM_BLOCK)
 	@echo "  Making the volume on it..."
-	@$(TAGFS_TOOL) --block $(MEDIUM_BLOCK) --kernel $(KERNEL_BIN) $@ $(VOLUME_LAID)
+	@$(TAGFS_TOOL) --block $(MEDIUM_BLOCK) --kernel $(KERNEL_BIN) --system $(GANGWAY_KEPT) $@ $(VOLUME_LAID)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
 	@#
 	@# volume-read is the format's second reader, written apart from the tool
@@ -2269,12 +2277,14 @@ $(BUILDDIR)/edk2-vars.fd: | $(BUILDDIR)
 # §3.5.1) and startup.nsh, which runs it from a UEFI Shell that finds no boot
 # option. Its times and serial are fixed, so the same tree lays the same bytes.
 ESP_FAT = $(FAT_TOOL) --sector $(MEDIUM_BLOCK) --time 315532800
-$(UEFI_ESP_IMG): $(GANGWAY_EFI) $(MEDIUM_BLOCK_MARK) $(FAT_TOOL) | $(BUILDDIR)
+$(GANGWAY_KEPT): $(GANGWAY_EFI)
+	@cp $< $@
+$(UEFI_ESP_IMG): $(GANGWAY_EFI) $(MEDIUM_BLOCK_MARK) $(FAT_TOOL) $(SRCDIR)/include/boxos_esp.h | $(BUILDDIR)
 	@echo "Creating UEFI ESP image (FAT32 of $(MEDIUM_BLOCK)-byte sectors) for sector $(ESP_START_SECTOR)..."
 	@rm -f $@ $@.nsh
-	@printf '@echo -off\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\n' > $@.nsh
+	@printf '@echo -off\r\n\\%s\r\n' "$$(echo '$(call EspName,ESP_FALLBACK)' | tr '/' '\\')" > $@.nsh
 	@$(ESP_FAT) --hidden $$(( $(ESP_START_SECTOR) / $(MEDIUM_PER) )) $@ lay least --label "BOXOS ESP" --id 0xB0320033 >/dev/null
-	@$(ESP_FAT) $@ put EFI/BOOT/BOOTX64.EFI $(GANGWAY_EFI)
+	@$(ESP_FAT) $@ put $(call EspName,ESP_FALLBACK) $(GANGWAY_EFI)
 	@$(ESP_FAT) $@ put startup.nsh $@.nsh
 	@rm -f $@.nsh
 

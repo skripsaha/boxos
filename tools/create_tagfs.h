@@ -121,6 +121,7 @@ int          parse_tags(const char* tag_string, const char* path,
  * 0, or -1 having said why. */
 int PassportOf(const char* filename, uint64_t* passport);
 void         CargoNameKernel(const char* path);
+int          CargoKeepSystem(const char* path);
 VolumePacked PackedStamp(int file_count, char* argv[], int first,
                          const char* kernel_path);
 void         CargoRelease(void);

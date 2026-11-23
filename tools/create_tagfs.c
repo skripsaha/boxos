@@ -15,14 +15,16 @@
  * This file is the modes and nothing else; what each of them writes is in the
  * files create_tagfs.h names.
  *
- * Usage: create_tagfs [--block <bytes>] [--kernel <file>] <disk_image> [<file> <tags>] ...
- *        create_tagfs --ground [--kernel <file>] [<file> <tags>] ...
- *        create_tagfs --frame-only [--kernel <file>] <disk_image> [<file> <tags>] ...
+ * Usage: create_tagfs [--block <bytes>] [--kernel <file>] [--system <file>]... <disk_image> [<file> <tags>] ...
+ *        create_tagfs --ground [--kernel <file>] [--system <file>]... [<file> <tags>] ...
+ *        create_tagfs --frame-only [--kernel <file>] [--system <file>]... <disk_image> [<file> <tags>] ...
  *
  * ‼ THE TAGS ARE THE FILE'S USER'S WORDS, AND THE ROLE IS NOT ONE OF THEM.
  * What the volume keeps a file as — the kernel, a program of the system, one
  * a loader may boot with — is never in the list of tags. The kernel is the
- * file --kernel names, which must be one of the files given; a program says
+ * file --kernel names, which must be one of the files given; a file that is
+ * not a box but the system keeps — the loader a volume's maker puts on an
+ * ESP — is kept in the system's role when --system names it; a program says
  * what it is in its own box (the part `role`, tools/pack --role), and this
  * tool, which lays the boxes it has just packed, trusts it. Nothing running
  * on the volume grants a role from a box, and no tag ever did.
@@ -32,9 +34,9 @@
 
 static int Usage(const char* self)
 {
-    fprintf(stderr, "Usage: %s [--block <bytes>] [--name <name>] [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
-    fprintf(stderr, "       %s --ground [--kernel <file>] [<file> <tags>] ...\n", self);
-    fprintf(stderr, "       %s --frame-only [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
+    fprintf(stderr, "Usage: %s [--block <bytes>] [--name <name>] [--kernel <file>] [--system <file>]... <disk_image> [<file> <tags>] ...\n", self);
+    fprintf(stderr, "       %s --ground [--kernel <file>] [--system <file>]... [<file> <tags>] ...\n", self);
+    fprintf(stderr, "       %s --frame-only [--kernel <file>] [--system <file>]... <disk_image> [<file> <tags>] ...\n", self);
     fprintf(stderr, "\n");
     fprintf(stderr, "Makes a BoxOS volume on the run of this image claimed for\n");
     fprintf(stderr, "BoxOS by its partition table (MBR type 0x7F, or the BoxOS\n");
@@ -42,7 +44,8 @@ static int Usage(const char* self)
     fprintf(stderr, "Nothing outside that run is touched. A file's tags are its\n");
     fprintf(stderr, "user's words; what the system keeps a file as is its role:\n");
     fprintf(stderr, "the kernel is the file --kernel names (the one the Deed\n");
-    fprintf(stderr, "points a loader at), a program says its own in its box.\n");
+    fprintf(stderr, "points a loader at), a file --system names is kept in the\n");
+    fprintf(stderr, "system's role, a program says its own in its box.\n");
     fprintf(stderr, "--block is the block the image's medium is addressed in\n");
     fprintf(stderr, "(4096 for a 4Kn medium, 512 by default): its partition\n");
     fprintf(stderr, "table counts in it.\n");
@@ -90,16 +93,19 @@ static int NameOptionTake(int* argc, char* argv[])
     return 1;
 }
 
-/* The option --kernel <file> at argv[at], taken out of the arguments when it
- * is there: the file is named to the cargo, and the arguments after it move
- * up. False when the option has no file after it. */
-static int KernelOptionTake(int* argc, char* argv[], int at)
+/* The options --kernel <file> and --system <file> at argv[at], in any order
+ * and --system as often as there are files, taken out of the arguments while
+ * they are there: each file is named to the cargo, and the arguments after it
+ * move up. False for an option with no file after it, or no memory. */
+static int RoleOptionsTake(int* argc, char* argv[], int at)
 {
-    if (*argc <= at || strcmp(argv[at], "--kernel") != 0) return 1;
-    if (*argc < at + 2) return 0;
-    CargoNameKernel(argv[at + 1]);
-    for (int i = at; i + 2 < *argc + 1; i++) argv[i] = argv[i + 2];
-    *argc -= 2;
+    while (*argc > at && (strcmp(argv[at], "--kernel") == 0 || strcmp(argv[at], "--system") == 0)) {
+        if (*argc < at + 2) return 0;
+        if (argv[at][2] == 'k') CargoNameKernel(argv[at + 1]);
+        else if (CargoKeepSystem(argv[at + 1]) != 0) return 0;
+        for (int i = at; i + 2 < *argc + 1; i++) argv[i] = argv[i + 2];
+        *argc -= 2;
+    }
     return 1;
 }
 
@@ -110,17 +116,17 @@ int main(int argc, char* argv[]) {
     if (g_volume_name && argc >= 2 && (strcmp(argv[1], "--ground") == 0 || strcmp(argv[1], "--frame-only") == 0))
         return Usage(argv[0]);
     if (argc >= 2 && strcmp(argv[1], "--ground") == 0) {
-        if (!KernelOptionTake(&argc, argv, 2) || (argc - 2) % 2 != 0) return Usage(argv[0]);
+        if (!RoleOptionsTake(&argc, argv, 2) || (argc - 2) % 2 != 0) return Usage(argv[0]);
         return GroundSay((argc - 2) / 2, argv, 2);
     }
 
     /* --frame-only lays a Deed over files and writes no book. */
     if (argc >= 3 && strcmp(argv[1], "--frame-only") == 0) {
-        if (!KernelOptionTake(&argc, argv, 2) || argc < 3 || (argc - 3) % 2 != 0) return Usage(argv[0]);
+        if (!RoleOptionsTake(&argc, argv, 2) || argc < 3 || (argc - 3) % 2 != 0) return Usage(argv[0]);
         return FrameOnlyMake(argv[2], (argc - 3) / 2, argv, 3);
     }
 
-    if (!KernelOptionTake(&argc, argv, 1) || argc < 2 || (argc - 2) % 2 != 0 || argv[1][0] == '-')
+    if (!RoleOptionsTake(&argc, argv, 1) || argc < 2 || (argc - 2) % 2 != 0 || argv[1][0] == '-')
         return Usage(argv[0]);
     return BookMake(argv[1], (argc - 2) / 2, argv, 2);
 }
