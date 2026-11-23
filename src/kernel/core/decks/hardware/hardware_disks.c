@@ -24,6 +24,7 @@
 #include "tagfs.h"
 #include "boardroom.h"
 #include "disk_table.h"
+#include "disk_look.h"
 
 /* The most volumes of the house one disk is asked about: a table names at most
  * this many BoxOS partitions anybody stands on before the rest are counted. */
@@ -57,9 +58,11 @@ static uint32_t DisksVolumeAt(const DisksStanding* s, uint64_t first)
     return 0;
 }
 
-/* One disk's record and those of its partitions and free runs, laid at kp +
- * pos, or only measured with kp NULL: the position past them. */
-static uint64_t DisksRecord(uint8_t* kp, uint64_t pos, const DiskTable* t, const DisksStanding* s)
+/* One disk's record and those of its partitions — each with what it holds,
+ * `looks` — and free runs, laid at kp + pos, or only measured with kp NULL:
+ * the position past them. */
+static uint64_t DisksRecord(uint8_t* kp, uint64_t pos, const DiskTable* t, const DisksStanding* s,
+                            const DiskLook* looks)
 {
     const char* name     = BoardroomSeatName(t->seat);
     uint16_t    name_len = (uint16_t)(name ? strnlen(name, DISK_NAME_MOST) : 0);
@@ -83,26 +86,34 @@ static uint64_t DisksRecord(uint8_t* kp, uint64_t pos, const DiskTable* t, const
         memcpy(r + 26, &parts, 2);
         memcpy(r + 28, &free, 2);
         memcpy(r + 30, &name_len, 2);
+        if (t->state == DISK_TABLE_GPT)
+            memcpy(r + 32, t->disk_guid, 16);
         memcpy(r + DISK_LISTED_HEAD, name, name_len);
     }
     for (uint32_t i = 0; i < t->part_count; i++) {
         const DiskPart* p      = &t->parts[i];
+        const DiskLook* look   = &looks[i];
         uint16_t        len    = (uint16_t)strnlen(p->name, DISK_NAME_MOST);
         uint32_t        volume = p->kind == DISK_PART_BOXOS ? DisksVolumeAt(s, p->first) : 0;
         if (kp) {
             uint8_t* r      = kp + at;
             uint64_t blocks = p->last - p->first + 1u;
             r[0] = (uint8_t)p->kind;
-            r[1] = volume ? DISK_PART_MOUNTED : 0u;
+            r[1] = (uint8_t)((volume ? DISK_PART_MOUNTED : 0u) | look->flags);
             memcpy(r + 2, &p->entry, 2);
             memcpy(r + 4, &volume, 4);
             memcpy(r + 8, &p->first, 8);
             memcpy(r + 16, &blocks, 8);
             memcpy(r + 24, p->type, 16);
             memcpy(r + 40, &len, 2);
+            memcpy(r + 42, p->unique, 16);
+            r[58] = look->holds;
+            r[59] = 0;
+            memcpy(r + 60, &look->loaders_len, 2);
             memcpy(r + DISK_PART_LISTED_HEAD, p->name, len);
+            memcpy(r + DISK_PART_LISTED_HEAD + len, look->loaders, look->loaders_len);
         }
-        at += DISK_PART_LISTED_HEAD + len;
+        at += DISK_PART_LISTED_HEAD + len + look->loaders_len;
     }
     for (uint32_t i = 0; i < t->free_count; i++) {
         if (kp) {
@@ -129,19 +140,31 @@ int HwDisksList(const ManifestOp* op, Crate* crates, uint16_t crate_count, const
     uint8_t        seats = BoardroomSeatCount();
     DiskTable*     tables = seats ? (DiskTable*)kmalloc(seats * sizeof(DiskTable)) : NULL;
     DisksStanding* standing = seats ? (DisksStanding*)kmalloc(seats * sizeof(DisksStanding)) : NULL;
-    if (seats && (!tables || !standing)) {
+    DiskLook**     looks = seats ? (DiskLook**)kmalloc(seats * sizeof(DiskLook*)) : NULL;
+    if (seats && (!tables || !standing || !looks)) {
         kfree(tables);
         kfree(standing);
+        kfree(looks);
         return ERR_NO_MEMORY;
     }
 
+    int      rc    = OK;
     uint32_t total = 0, delivered = 0, read = 0;
     uint64_t need  = 8;
-    for (uint8_t seat = 0; seat < seats; seat++) {
+    for (uint8_t seat = 0; seat < seats && rc == OK; seat++) {
         if (DiskTableRead(seat, &tables[read]) != OK)
             continue;
         DisksStandingOn(seat, tables[read].block_bytes, &standing[read]);
-        uint64_t past = DisksRecord(NULL, need, &tables[read], &standing[read]);
+        uint32_t parts = tables[read].part_count;
+        looks[read]    = (DiskLook*)kmalloc((parts ? parts : 1u) * sizeof(DiskLook));
+        if (!looks[read]) {
+            DiskTableLetGo(&tables[read]);
+            rc = ERR_NO_MEMORY;
+            break;
+        }
+        for (uint32_t i = 0; i < parts; i++)
+            DiskLookAt(&tables[read], i, &looks[read][i]);
+        uint64_t past = DisksRecord(NULL, need, &tables[read], &standing[read], looks[read]);
         if (past <= out->capacity && delivered == total) {
             need = past;
             delivered++;
@@ -150,14 +173,13 @@ int HwDisksList(const ManifestOp* op, Crate* crates, uint16_t crate_count, const
         read++;
     }
 
-    int      rc = OK;
-    uint8_t* kp = crate_out_alloc(out, need);
-    if (!kp) {
+    uint8_t* kp = rc == OK ? crate_out_alloc(out, need) : NULL;
+    if (rc == OK && !kp) {
         rc = ERR_INVALID_ADDRESS;
-    } else {
+    } else if (rc == OK) {
         uint64_t pos = 8;
         for (uint32_t i = 0; i < delivered; i++)
-            pos = DisksRecord(kp, pos, &tables[i], &standing[i]);
+            pos = DisksRecord(kp, pos, &tables[i], &standing[i], looks[i]);
         memcpy(kp, &delivered, 4);
         memcpy(kp + 4, &total, 4);
         rc = crate_out_commit(out, ctx, kp, pos);
@@ -165,10 +187,13 @@ int HwDisksList(const ManifestOp* op, Crate* crates, uint16_t crate_count, const
         if (rc == OK)
             out->size = pos;
     }
-    for (uint32_t i = 0; i < read; i++)
+    for (uint32_t i = 0; i < read; i++) {
         DiskTableLetGo(&tables[i]);
+        kfree(looks[i]);
+    }
     kfree(tables);
     kfree(standing);
+    kfree(looks);
     return rc;
 }
 

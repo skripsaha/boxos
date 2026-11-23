@@ -25,11 +25,12 @@ static size_t disks_measured(const uint8_t *records, size_t bytes, uint32_t coun
         at   += DISK_LISTED_HEAD + name_len;
         text += name_len + 1u;
         for (uint16_t k = 0; k < p; k++) {
-            uint16_t len;
+            uint16_t len, loaders;
             if (at + DISK_PART_LISTED_HEAD > bytes) return 0;
             memcpy(&len, records + at + 40, 2);
-            at   += DISK_PART_LISTED_HEAD + len;
-            text += len + 1u;
+            memcpy(&loaders, records + at + 60, 2);
+            at   += DISK_PART_LISTED_HEAD + len + loaders;
+            text += len + 1u + loaders;
         }
         at += (size_t)f * DISK_FREE_LISTED;
         if (at > bytes) return 0;
@@ -70,6 +71,7 @@ static int disks_laid(const uint8_t *records, size_t bytes, uint32_t count, Disk
         memcpy(&p, r + 26, 2);
         memcpy(&f, r + 28, 2);
         memcpy(&name_len, r + 30, 2);
+        memcpy(d->Guid, r + 32, 16);
         d->Name = pen;
         memcpy(pen, r + DISK_LISTED_HEAD, name_len);
         pen += name_len;
@@ -80,20 +82,35 @@ static int disks_laid(const uint8_t *records, size_t bytes, uint32_t count, Disk
         d->Parts     = part;
         for (uint16_t k = 0; k < p; k++, part++) {
             const uint8_t *e = records + at;
-            uint16_t       len;
-            part->Kind    = e[0];
-            part->Mounted = (e[1] & DISK_PART_MOUNTED) != 0;
+            uint16_t       len, loaders;
+            part->Kind          = e[0];
+            part->Mounted       = (e[1] & DISK_PART_MOUNTED) != 0;
+            part->DefaultLoader = (e[1] & DISK_PART_DEFAULT_LOADER) != 0;
+            part->MoreLoaders   = (e[1] & DISK_PART_MORE_LOADERS) != 0;
             memcpy(&part->Entry, e + 2, 2);
             memcpy(&part->Volume, e + 4, 4);
             memcpy(&part->First, e + 8, 8);
             memcpy(&part->Blocks, e + 16, 8);
             memcpy(part->Type, e + 24, 16);
             memcpy(&len, e + 40, 2);
+            memcpy(part->Unique, e + 42, 16);
+            part->Holds = e[58];
+            memcpy(&loaders, e + 60, 2);
             part->Name = pen;
             memcpy(pen, e + DISK_PART_LISTED_HEAD, len);
             pen += len;
             *pen++ = '\0';
-            at += DISK_PART_LISTED_HEAD + len;
+            /* The loaders, each NUL-ended as the record has them. */
+            memcpy(pen, e + DISK_PART_LISTED_HEAD + len, loaders);
+            part->LoaderCount = 0;
+            for (uint16_t b = 0; b < loaders && part->LoaderCount < DISK_LOADERS_MOST;) {
+                part->Loaders[part->LoaderCount++] = pen + b;
+                while (b < loaders && pen[b]) b++;
+                b++;
+            }
+            if (loaders && pen[loaders - 1u]) part->LoaderCount = 0;    /* a list that does not end is none */
+            pen += loaders;
+            at += DISK_PART_LISTED_HEAD + len + loaders;
         }
         d->FreeCount = f;
         d->Free      = run;
@@ -107,11 +124,11 @@ static int disks_laid(const uint8_t *records, size_t bytes, uint32_t count, Disk
     return 0;
 }
 
-/* Room for one disk's record as tables are made: its fixed part and name, and
- * the 128 entries every partitioning tool writes, each named, with a free run
- * past each. A table of more is room asked again. */
-#define DISK_RECORD_COMMON (DISK_LISTED_HEAD + DISK_NAME_MOST + 128u * (DISK_PART_LISTED_HEAD + DISK_NAME_MOST + \
-                                                                        DISK_FREE_LISTED))
+/* Room for one disk's record as tables are made: its fixed part and name, an
+ * ESP's loaders, and the 128 entries every partitioning tool writes, each
+ * named, with a free run past each. A table of more is room asked again. */
+#define DISK_RECORD_COMMON (DISK_LISTED_HEAD + DISK_NAME_MOST + DISK_LOADERS_MOST * (DISK_LOADER_NAME_MOST + 1u) + \
+                            128u * (DISK_PART_LISTED_HEAD + DISK_NAME_MOST + DISK_FREE_LISTED))
 /* The largest table the kernel reads holds eight times that many entries. */
 #define DISK_RECORD_ROOMS_MOST 8u
 
@@ -147,6 +164,27 @@ int disk_list(DiskListed **out, size_t *count)
         if (rc == 0) *count = delivered;
         return rc;
     }
+}
+
+const char *disk_loader_shown(const char *dir)
+{
+    static const struct {
+        const char *dir;
+        const char *system;
+    } known[] = {
+        { "Microsoft", "Windows" }, { "ubuntu", "Ubuntu" },    { "debian", "Debian" },   { "fedora", "Fedora" },
+        { "opensuse", "openSUSE" }, { "redhat", "Red Hat" },    { "centos", "CentOS" },   { "rocky", "Rocky Linux" },
+        { "almalinux", "AlmaLinux" }, { "arch", "Arch Linux" }, { "manjaro", "Manjaro" }, { "pop", "Pop!_OS" },
+        { "linuxmint", "Linux Mint" }, { "elementary", "elementary OS" }, { "neon", "KDE neon" },
+        { "systemd", "systemd-boot" }, { "refind", "rEFInd" },  { "grub", "GRUB" },       { "Apple", "macOS" },
+        { "BoxOS", "BoxOS" },
+    };
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+        const char *a = dir, *b = known[i].dir;
+        while (*a && *b && ((*a | 32) == (*b | 32))) a++, b++;
+        if (!*a && !*b) return known[i].system;
+    }
+    return dir;
 }
 
 size_t disk_named(const char **text, const DiskListed *disks, size_t count, const DiskListed **out)

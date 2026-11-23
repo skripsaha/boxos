@@ -129,6 +129,53 @@ static inline const char* DiskKindName(DiskPartKind kind)
     }
 }
 
+/*
+ * What a partition holds, as its own first bytes say it — read off the head of
+ * the partition, whatever its table calls it (a "Windows data" partition may
+ * hold NTFS, a BitLocker volume, exFAT or FAT): the signatures util-linux's
+ * libblkid knows them by, every one within the partition's first 4 KiB. A
+ * file system a person can lose is named so before anything is laid near it.
+ */
+typedef enum {
+    DISK_HOLDS_UNKNOWN = 0,       /* nothing this kernel knows */
+    DISK_HOLDS_EMPTY,             /* its head is zeros */
+    DISK_HOLDS_BOXOS,             /* a BoxOS volume: its Deed */
+    DISK_HOLDS_NTFS,
+    DISK_HOLDS_BITLOCKER,         /* a volume BitLocker locked: nothing of it reads without its key */
+    DISK_HOLDS_FAT,
+    DISK_HOLDS_EXFAT,
+    DISK_HOLDS_EXT4,
+    DISK_HOLDS_EXT,               /* ext2 or ext3 */
+    DISK_HOLDS_SWAP,              /* Linux swap, or a Linux hibernation image in it */
+    DISK_HOLDS_APFS,
+    DISK_HOLDS_HFS,               /* HFS+ or HFSX */
+} DiskHolds;
+
+/* What a partition holds, as a person is told it. */
+static inline const char* DiskHoldsName(DiskHolds holds)
+{
+    switch (holds) {
+    case DISK_HOLDS_EMPTY:     return "empty";
+    case DISK_HOLDS_BOXOS:     return "a BoxOS volume";
+    case DISK_HOLDS_NTFS:      return "NTFS";
+    case DISK_HOLDS_BITLOCKER: return "locked by BitLocker";
+    case DISK_HOLDS_FAT:       return "FAT";
+    case DISK_HOLDS_EXFAT:     return "exFAT";
+    case DISK_HOLDS_EXT4:      return "ext4";
+    case DISK_HOLDS_EXT:       return "ext2/ext3";
+    case DISK_HOLDS_SWAP:      return "swap";
+    case DISK_HOLDS_APFS:      return "APFS";
+    case DISK_HOLDS_HFS:       return "HFS+";
+    default:                   return "unknown";
+    }
+}
+
+/* The loaders an ESP carries: the directories under its EFI (UEFI 2.10
+ * §13.3.1.3), each a system's — "Microsoft", "ubuntu", "BoxOS" —, at most
+ * DISK_LOADERS_MOST of them listed, each name cut to DISK_LOADER_NAME_MOST. */
+#define DISK_LOADERS_MOST        8u
+#define DISK_LOADER_NAME_MOST    32u
+
 /* What the table of a disk is in. */
 typedef enum {
     DISK_TABLE_NONE = 0,     /* no table: a blank disk, or one only a whole new table can use */
@@ -153,6 +200,8 @@ typedef enum {
 
 /* A partition's flags in a listed record. */
 #define DISK_PART_MOUNTED        0x01u   /* a volume of the house stands on it, `volume` its number + 1 */
+#define DISK_PART_DEFAULT_LOADER 0x02u   /* an ESP whose removable-media default is laid (EFI/BOOT/BOOTX64.EFI) */
+#define DISK_PART_MORE_LOADERS   0x04u   /* an ESP carrying more loaders than DISK_LOADERS_MOST */
 
 /*
  * hw.disks.list — out_crate = [u32 delivered][u32 total], then `delivered`
@@ -161,10 +210,11 @@ typedef enum {
  *   disk:      [u8 seat][u8 board (BoardKind)][u8 flags (DISK_*)][u8 table (DiskTableState)]
  *              [u32 seating][u32 block_bytes][u32 physical_bytes][u64 blocks]
  *              [u8 copies (DISK_COPY_*)][u8 reserved][u16 parts][u16 free][u16 name_len]
- *              [name]                            — DISK_LISTED_HEAD bytes before the name
+ *              [u8 guid[16]][name]               — DISK_LISTED_HEAD bytes before the name
  *   partition: [u8 kind (DiskPartKind)][u8 flags (DISK_PART_*)][u16 entry][u32 volume]
- *              [u64 first_block][u64 blocks][u8 type[16]][u16 name_len][name]
- *                                                — DISK_PART_LISTED_HEAD before the name
+ *              [u64 first_block][u64 blocks][u8 type[16]][u16 name_len]
+ *              [u8 unique[16]][u8 holds (DiskHolds)][u8 reserved][u16 loaders_len]
+ *              [name][loaders]                   — DISK_PART_LISTED_HEAD before the name
  *   free run:  [u64 first_block][u64 blocks]     — DISK_FREE_LISTED bytes
  *
  * `parts` partitions, then `free` free runs follow each disk. Blocks are the
@@ -173,10 +223,14 @@ typedef enum {
  * since is refused (ERR_OBJECT_NOT_FOUND). A free run begins on the grain
  * (DISK_GRAIN_BYTES) and is at least one grain long. `entry` is the
  * partition's place in its table; `type` its type, zeros on an MBR but its
- * byte in type[0]; `name` the one the table gives it, UTF-8.
+ * byte in type[0]; `name` the one the table gives it, UTF-8. `guid` is a GPT's
+ * own and `unique` each of its partitions' — what a disk and a partition are
+ * known by across seats and starts — zeros on an MBR. `holds` is what the
+ * partition's first bytes say it holds; `loaders` the names of an ESP's
+ * loaders, each NUL-ended (DISK_LOADERS_MOST of them at the most).
  */
-#define DISK_LISTED_HEAD         32u
-#define DISK_PART_LISTED_HEAD    42u
+#define DISK_LISTED_HEAD         48u
+#define DISK_PART_LISTED_HEAD    62u
 #define DISK_FREE_LISTED         16u
 #define DISK_NAME_MOST           108u    /* 36 UTF-16 units of a GPT name, as UTF-8 */
 

@@ -93,6 +93,28 @@ static void disks_volume_said(uint32_t number, char *out, size_t room)
     free(v);
 }
 
+/* What a partition holds, after its volume when one stands on it: an ESP the
+ * systems its loaders start, any other what its first bytes say. Nothing for
+ * a volume of the house, which is said already, nor for a head this system
+ * cannot read. */
+static void disks_holds_said(const DiskPartListed *p, char *out, size_t room)
+{
+    out[0] = '\0';
+    if (p->Volume || p->Holds == DISK_HOLDS_UNKNOWN) return;
+    if (p->Kind == DISK_PART_ESP && p->Holds == DISK_HOLDS_FAT) {
+        if (!p->LoaderCount) {
+            snprintf(out, room, p->DefaultLoader ? " — starts the loader it keeps as the firmware's default" : " — empty");
+            return;
+        }
+        size_t at = (size_t)snprintf(out, room, " — starts ");
+        for (size_t k = 0; k < p->LoaderCount && at < room; k++)
+            at += (size_t)snprintf(out + at, room - at, "%s%s", k ? ", " : "", disk_loader_shown(p->Loaders[k]));
+        if (p->MoreLoaders && at < room) snprintf(out + at, room - at, " and more");
+        return;
+    }
+    snprintf(out, room, " — %s", DiskHoldsName((DiskHolds)p->Holds));
+}
+
 static void disks_say(const DiskListed *d)
 {
     char size[24];
@@ -117,14 +139,16 @@ static void disks_say(const DiskListed *d)
     for (size_t i = 0; i < d->PartCount; i++) {
         const DiskPartListed *p = &d->Parts[i];
         char volume[STORAGE_VOLUME_NAME_MOST + 96] = "";
+        char holds[DISK_LOADERS_MOST * (DISK_LOADER_NAME_MOST + 2u) + 48u] = "";
         size_shown(disks_bytes(d, p->Blocks), size, sizeof(size));
         if (p->Volume) {
             char said[STORAGE_VOLUME_NAME_MOST + 80];
             disks_volume_said(p->Volume - 1u, said, sizeof(said));
             snprintf(volume, sizeof(volume), " — %s", said);
         }
-        printf("   entry %u  %s, %s%s%s%s%s\n", p->Entry, DiskKindName((DiskPartKind)p->Kind), size,
-               p->Name[0] ? " \"" : "", p->Name, p->Name[0] ? "\"" : "", volume);
+        disks_holds_said(p, holds, sizeof(holds));
+        printf("   entry %u  %s, %s%s%s%s%s%s\n", p->Entry, DiskKindName((DiskPartKind)p->Kind), size,
+               p->Name[0] ? " \"" : "", p->Name, p->Name[0] ? "\"" : "", volume, holds);
     }
     for (size_t i = 0; i < d->FreeCount; i++) {
         size_shown(disks_bytes(d, d->Free[i].Blocks), size, sizeof(size));

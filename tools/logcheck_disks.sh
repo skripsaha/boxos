@@ -132,6 +132,40 @@ run_disks() {
         harness "disks: the sticks could not be laid"
         return
     fi
+    # What the partitions hold, as another system leaves them: the Windows
+    # stick's ESP a FAT32 carrying Windows' loader, its data NTFS, its
+    # recovery locked by BitLocker; the other stick's Linux home ext4.
+    head -c 200000 /dev/urandom >"$SCRATCH/disks.bootmgfw.bin"
+    if ! python3 - "$SCRATCH/disks.win.img" "$SCRATCH/disks.dmg.img" <<'PY'
+import json, subprocess, sys
+def parts(img):
+    return json.loads(subprocess.check_output(["python3", "tools/disks.py", "read", img, "--json"]))["parts"]
+def head(img, first, at, data):
+    with open(img, "r+b") as f:
+        f.seek(first * 512 + at)
+        f.write(data)
+win, dmg = sys.argv[1:]
+for p in parts(win):
+    if p["kind"] == "windows":
+        head(win, p["first"], 0, b"\xeb\x52\x90NTFS    " + bytes(499) + b"\x55\xaa")
+    elif p["kind"] == "recovery":
+        head(win, p["first"], 0, b"\xeb\x58\x90-FVE-FS-")
+for p in parts(dmg):
+    if p["kind"] == "linux":
+        head(dmg, p["first"], 1024, bytes(0x38) + b"\x53\xef" + bytes(0x60 - 0x3a) + b"\x40\x00\x00\x00")
+PY
+    then
+        harness "disks: the partitions' heads could not be laid"
+        return
+    fi
+    t=$(python3 tools/disks.py read "$SCRATCH/disks.win.img" --json | python3 -c 'import json, sys
+p = next(p for p in json.load(sys.stdin)["parts"] if p["kind"] == "esp")
+print(p["first"], (p["last"] - p["first"] + 1) * 512)')
+    if ! build/fat --at "${t% *}" "$SCRATCH/disks.win.img" lay "${t#* }" >/dev/null ||
+       ! build/fat --at "${t% *}" "$SCRATCH/disks.win.img" put EFI/Microsoft/Boot/bootmgfw.efi "$SCRATCH/disks.bootmgfw.bin"; then
+        harness "disks: the Windows stick's ESP could not be laid"
+        return
+    fi
     cp "$SCRATCH/disks.win.img" "$SCRATCH/disks.win.before"
     cp "$SCRATCH/disks.dmg.img" "$SCRATCH/disks.dmg.before"
 
@@ -168,9 +202,13 @@ run_disks() {
     disks_said '^   entry [0-9]+  BoxOS, .* — volume 0, .*\(home\)$' "and the home volume on its partition"
     disks_said '^Disk [0-9]+ — .*, 419 MB, no table, in 4096-byte blocks, removable$' \
         "a blank stick of 4096-byte blocks is shown with no table, in its blocks"
-    disks_said '^   entry 2  Windows data, 419 MB "Basic data partition"$' "Windows' data is shown by its kind and name"
+    disks_said '^   entry 2  Windows data, 419 MB "Basic data partition" — NTFS$' \
+        "Windows' data is shown by its kind and name, and what it holds: NTFS"
     disks_said '^   entry 1  Windows reserved, ' "and its reserved partition"
-    disks_said '^   entry 3  Windows recovery, ' "and its recovery"
+    disks_said '^   entry 3  Windows recovery, .* — locked by BitLocker$' "and its recovery, locked by BitLocker"
+    disks_said '^   entry 0  EFI system, .*"EFI system partition" — starts Windows$' \
+        "and its ESP by the system its loader starts"
+    disks_said '^   entry 1  Linux, .*"home" — ext4$' "a Linux home is shown holding ext4"
     disks_said '^   free  349 MB, from block 1161216$' "and the free space after them"
     disks_said "its GPT is not where the disk says it is — reading the copy at the far end, sector $((200 * 2048 - 1))" \
         "a table whose first copy is gone is read from the far end of the disk"

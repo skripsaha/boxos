@@ -42,6 +42,12 @@ typedef struct {
     uint64_t    First;      /* the disk's blocks */
     uint64_t    Blocks;
     uint8_t     Type[16];   /* its GPT type; an MBR's byte in Type[0] */
+    uint8_t     Unique[16]; /* its own GUID, what it is known by across seats; zeros on an MBR */
+    uint8_t     Holds;      /* DiskHolds: what its first bytes say it holds */
+    bool        DefaultLoader;  /* an ESP whose removable-media default is laid */
+    bool        MoreLoaders;    /* an ESP carrying more loaders than are listed */
+    size_t      LoaderCount;
+    const char *Loaders[DISK_LOADERS_MOST];  /* an ESP's: the directories under its EFI, a system's each */
     const char *Name;       /* the name its table gives it, UTF-8 */
 } DiskPartListed;
 
@@ -62,6 +68,7 @@ typedef struct {
     uint32_t        BlockBytes;
     uint32_t        PhysicalBytes;  /* 0: the medium would not say */
     uint64_t        Blocks;         /* 0: the medium would not say */
+    uint8_t         Guid[16];       /* a GPT's own, what the disk is known by across seats; zeros otherwise */
     const char     *Name;           /* what the medium calls itself */
     size_t          PartCount;
     DiskPartListed *Parts;          /* in the order of their first block */
@@ -81,6 +88,11 @@ int disk_list(DiskListed **out, size_t *count);
  * for none, nor one of that number; more when several share the name — *out
  * the first, and the person is to say which by its number. */
 size_t disk_named(const char **text, const DiskListed *disks, size_t count, const DiskListed **out);
+
+/* The system an ESP's loader directory starts, as a person is told it —
+ * "Microsoft" is Windows, "ubuntu" Ubuntu —, or the directory's own name for
+ * one this list does not know. */
+const char *disk_loader_shown(const char *dir);
 
 int disk_lay(const DiskListed *disk);
 int disk_add(const DiskListed *disk, uint8_t kind, uint64_t first, uint64_t blocks, uint16_t *entry);
