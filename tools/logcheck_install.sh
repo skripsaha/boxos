@@ -148,7 +148,7 @@ print(p["first"], (p["last"] - p["first"] + 1) * 512)')
            disks_ask "say hello from home -> mine.txt" && disks_ask "tag mine.txt kind:mine" &&
            disks_ask "say left behind -> skip.txt" && disks_ask "tag skip.txt kind:skip"; then
             at=$(($(wc -l < build/serial.log) + 1))
-            type_line "install $fixed whole mine without kind:skip called Home first" && install_sign "$at" &&
+            type_line "install $fixed whole mine without kind:skip first called Home" && install_sign "$at" &&
                 install_done "$at" &&
                 at=$(($(wc -l < build/serial.log) + 1)) &&
                 type_line "install $pocket whole fresh called Pocket" && install_sign "$at" && install_done "$at" &&
@@ -230,7 +230,7 @@ print(next(p["first"] for p in json.load(sys.stdin)["parts"] if p["kind"] == "es
     if install_boot cut on "$SCRATCH/install.home.img" cut && disks_ask "disks"; then
         cut=$(disks_number "5 GB")
         at=$(($(wc -l < build/serial.log) + 1))
-        [ -n "$cut" ] && type_line "install $cut whole fresh called Cut last" && install_sign "$at" &&
+        [ -n "$cut" ] && type_line "install $cut whole fresh last called Cut" && install_sign "$at" &&
             wait_for_line -E build/serial.log '^    [0-9]+ of [0-9]+ file\(s\)' "$WAIT_QUIET_S" "$at" && rc=0
     fi
     make run-stop >/dev/null 2>&1
@@ -259,7 +259,7 @@ print(next(p["first"] for p in json.load(sys.stdin)["parts"] if p["kind"] == "es
     if install_boot again on "$SCRATCH/install.home.img" fixed pocket win && disks_ask "disks"; then
         fixed=$(disks_number "6 GB") pocket=$(disks_number "3 GB") win=$(disks_number "2 GB")
         at=$(($(wc -l < build/serial.log) + 1))
-        [ -n "$fixed" ] && type_line "install $fixed whole fresh called Again first" && install_sign "$at" &&
+        [ -n "$fixed" ] && type_line "install $fixed whole fresh first called Again" && install_sign "$at" &&
             install_done "$at" && cp "$SCRATCH/install.fixed.img" "$SCRATCH/install.fixed.again" &&
             at=$(($(wc -l < build/serial.log) + 1)) &&
             type_line "install remove $fixed" && install_sign "$at" &&
