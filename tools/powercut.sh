@@ -237,19 +237,22 @@ pc_gone() {    # pc_gone PID — the machine is gone, and so are its sockets
     rm -f build/qemu.pid build/qemu.mon build/qemu.qmp
 }
 
-# pc_base [CMD] — the volume every cut starts from: this tree's image, booted
-# once and switched off by its power button, so the mount's first writes and a
-# halt's sync are behind it. Settled, the next boot writes nothing to it. CMD,
-# typed on that boot and answered before the power button, is what the
-# scenario's machine is to be from then on.
+# pc_base [CMD ANSWER] — the volume every cut starts from: this tree's image,
+# booted once and switched off by its power button, so the mount's first writes
+# and a halt's sync are behind it. Settled, the next boot writes nothing to it.
+# CMD, typed on that boot and answered by ANSWER (grep -E) before the power
+# button, is what the scenario's machine is to be from then on.
 pc_base() {
     local pid
     pc_clone build/boxos.img "$PC_DIR/base.img" || return 1
     if ! pc_boot "$PC_DIR/base.img"; then
         bad "$PC_NAME: the base never reached a shell"; return 1
     fi
-    if [ -n "${1:-}" ] && ! { type_line "$1" && wait_for_prompt; }; then
-        bad "$PC_NAME: the base never answered '$1'"; return 1
+    local mark
+    mark=$(wc -l < build/serial.log)
+    if [ -n "${1:-}" ] && ! { type_line "$1" && wait_for_line -E build/serial.log "$2" "$WAIT_QUIET_S" $((mark + 1)) &&
+                              wait_for_prompt; }; then
+        bad "$PC_NAME: the base never answered '$1' with /$2/"; return 1
     fi
     pid=$(cat build/qemu.pid)
     mon_raw system_powerdown && pc_gone "$pid" || {
@@ -522,7 +525,7 @@ pc_expect() {
 # the cadence alone does — so the gardener is taken off the base's list of
 # programs the machine starts, and nothing but the cadence settles anything.
 pc_noanchor() {
-    pc_base "autostart remove gardener" && pc_logged || return 1
+    pc_base "autostart remove gardener.box" "^remove 'gardener': off the list" && pc_logged || return 1
     pc_step persist "persist write" \
         '\[PERSIST\] WROTE fid=[0-9]+ seq=[0-9]+ magic=0x42504552 checksum=0x[0-9a-f]+' || return 1
     sleep $((PC_CEILING_S + PC_D_S))
