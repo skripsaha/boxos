@@ -147,6 +147,8 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_diskboot.sh"
 # The machine scenario: tools/logcheck_machine.sh.
 . "$(dirname "$0")/logcheck_machine.sh"
+# The install scenario: tools/logcheck_install.sh.
+. "$(dirname "$0")/logcheck_install.sh"
 # The book's census and the stand's road on a book: tools/logcheck_book.sh,
 # its USB road tools/logcheck_book_usb.sh, the book the kernel writes read back
 # by both readers tools/logcheck_book_circle.sh; the kernel's Tallies of a book:
@@ -10358,6 +10360,7 @@ case "${1:-both}" in
     lay)        run_lay ;;
     diskboot)   run_diskboot ;;
     machine)    run_machine ;;
+    install)    run_install ;;
     uefi)     run_uefi ;;
     footing)  run_footing ;;
     stranger) run_stranger ;;
