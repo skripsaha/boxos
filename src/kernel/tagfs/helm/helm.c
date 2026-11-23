@@ -294,9 +294,8 @@ bool HelmVacated(const OpenFileEntry *ofe)
  */
 static HelmStandHold *s_stand_holds;   /* under helm.open_table_lock */
 
-void HelmReadyOnceVacated(HelmStandHold *hold, OpenFileEntry *ofe, HelmWaiter *w)
+void HelmReadyOnceVacated(TagFSVolume* vol, HelmStandHold *hold, OpenFileEntry *ofe, HelmWaiter *w)
 {
-    TagFSVolume* vol = TagFSHome();
     TagFSLockTake(&vol->helm.open_table_lock);
     bool now = __atomic_load_n(&ofe->helm.vacated, __ATOMIC_ACQUIRE);
     if (!now) {

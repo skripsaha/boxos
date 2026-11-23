@@ -67,7 +67,8 @@ typedef struct {
     process_t*   target;         /* pinned until the answer; NULL for the stand's */
     const char*  holder;         /* who owes the answer: the op's registered name */
     uint32_t     submit_cookie;
-    uint64_t     file_id;
+    uint64_t     file_id;        /* as the house names it: the chit's word */
+    TagFSVolume* vol;            /* the volume whose cycle it waits for */
     uint8_t      kind;           /* SettleOpKind */
     uint64_t     ticket;         /* USE: the demand the word is (UseMemorySay) */
     UseText*     said;           /* USE: the word, held until the answer */
@@ -99,6 +100,8 @@ static uint64_t op_file_id(const ManifestOp *op)
  * spoke first (box::tagfs::on_anchor subscribes by name). */
 static void AnchorPublish(uint64_t file_id, uint32_t pid)
 {
+    uint64_t     own = 0;
+    TagFSVolume *vol = file_id ? TagFSVolumeOfId(file_id, &own) : NULL;
     struct __attribute__((packed)) {
         uint64_t file_id;
         uint8_t  op;          /* 2 = ANCHOR */
@@ -106,14 +109,11 @@ static void AnchorPublish(uint64_t file_id, uint32_t pid)
         uint64_t now_us;
     } ev = { file_id, 2, {0}, 0 };
 
-    if (file_id != 0 && tagfs_enter(TagFSHome())) {
-        TagFSMetadata meta;
-        memset(&meta, 0, sizeof(meta));
-        if (tagfs_get_metadata(TagFSHome(), file_id, &meta) == OK) {
-            StorageFileSays(&meta, &ev, sizeof(ev), pid);
-            tagfs_metadata_free(&meta);
-        }
-        tagfs_leave(TagFSHome());
+    TagFSMetadata meta;
+    memset(&meta, 0, sizeof(meta));
+    if (vol && tagfs_get_metadata(vol, own, &meta) == OK) {
+        StorageFileSays(vol, &meta, &ev, sizeof(ev), pid);
+        tagfs_metadata_free(&meta);
     }
     TouchTag full, bare;
     (void)TouchTagResolve("anchor", sizeof("anchor") - 1, &full, &bare);
@@ -183,7 +183,7 @@ static void SettleOpAnswered(SettleWaiter* w, error_t rc)
 
 /* The program parked behind its Chit and the wait made ready for its waiter —
  * or NULL, and nothing parked, when there is no memory or no program. */
-static SettleOpWait* SettleOpPark(const OpContext *ctx, Crate *crates, uint8_t kind,
+static SettleOpWait* SettleOpPark(const OpContext *ctx, Crate *crates, uint8_t kind, TagFSVolume *vol,
                                   uint64_t file_id, const char *holder)
 {
     SettleOpWait* s = kmalloc(sizeof(SettleOpWait));
@@ -198,6 +198,7 @@ static SettleOpWait* SettleOpPark(const OpContext *ctx, Crate *crates, uint8_t k
     s->holder        = holder;
     s->submit_cookie = ctx->submit_cookie;
     s->file_id       = file_id;
+    s->vol           = vol;
     s->kind          = kind;
     s->crates_kbuf   = crates;
     s->crate_count   = ctx->crate_count;
@@ -212,11 +213,11 @@ static SettleOpWait* SettleOpPark(const OpContext *ctx, Crate *crates, uint8_t k
 
 /* The wait for Ink `gen`: its answer now, or ERR_WOULD_BLOCK with the program
  * parked and the waiter linked. Inside the door. */
-static int SettleOpWaitFor(const OpContext *ctx, Crate *crates, uint64_t file_id, uint64_t gen,
+static int SettleOpWaitFor(const OpContext *ctx, Crate *crates, TagFSVolume *vol, uint64_t file_id, uint64_t gen,
                            uint8_t kind, const char *holder)
 {
     uint32_t pid = ctx && ctx->proc ? ctx->proc->pid : 0;
-    error_t  now = SettleWaitNow(TagFSHome(), gen);
+    error_t  now = SettleWaitNow(vol, gen);
     if (now != ERR_WOULD_BLOCK) {
         SettleOpSay(kind, file_id, pid, now);
         return (int)now;
@@ -225,27 +226,39 @@ static int SettleOpWaitFor(const OpContext *ctx, Crate *crates, uint64_t file_id
     /* A caller with no program to park — a kernel path through the deck —
      * may wait for the cycle itself. */
     if (!pid) {
-        error_t settled = TagFSSettle(TagFSHome());
+        error_t settled = TagFSSettle(vol);
         SettleOpSay(kind, file_id, 0, settled);
         return (int)settled;
     }
 
-    SettleOpWait* s = SettleOpPark(ctx, crates, kind, file_id, holder);
+    SettleOpWait* s = SettleOpPark(ctx, crates, kind, vol, file_id, holder);
     if (!s)
         return ERR_NO_MEMORY;
-    SettleWaitLink(TagFSHome(), &s->w, gen, SettleOpAnswered);
+    SettleWaitLink(vol, &s->w, gen, SettleOpAnswered);
     return ERR_WOULD_BLOCK;
+}
+
+/* The volume an op of `file_id` waits on — that file's; the home volume's
+ * changes for 0, which names every change so far of the machine's own volume
+ * — and its own id of the file in *own. NULL for a file the house has not. */
+static TagFSVolume *SettleOpVolume(uint64_t file_id, uint64_t *own)
+{
+    *own = 0;
+    return file_id ? TagFSVolumeOfId(file_id, own) : TagFSHome();
 }
 
 int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
 {
     (void)crate_count;
-    uint64_t file_id = op_file_id(op);
-    if (!tagfs_enter(TagFSHome()))
+    uint64_t     file_id = op_file_id(op);
+    uint64_t     own     = 0;
+    TagFSVolume *vol     = SettleOpVolume(file_id, &own);
+    if (!vol)
+        return ERR_FILE_NOT_FOUND;
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
-    int rc = SettleOpWaitFor(ctx, crates, file_id, InkedGen(TagFSHome()), SETTLE_OP_ANCHOR,
-                             "storage.anchor");
-    tagfs_leave(TagFSHome());
+    int rc = SettleOpWaitFor(ctx, crates, vol, file_id, InkedGen(vol), SETTLE_OP_ANCHOR, "storage.anchor");
+    tagfs_leave(vol);
     return rc;
 }
 
@@ -253,11 +266,30 @@ int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count, const O
  * it lets go into the out crate. Nothing waits: the next Tally owes it. */
 int ObjEscheat(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
 {
-    EscheatSaid said;
     (void)crate_count;
-    error_t rc = TagFSEscheat(TagFSHome(), StorageCallWarrant(ctx), &said);
+    /* Every mounted volume's book: what each lets go, summed; nothing to let
+     * go anywhere is ERR_OBJECT_NOT_FOUND, and another refusal the first. */
+    EscheatSaid all  = { 0 };
+    error_t     rc   = ERR_OBJECT_NOT_FOUND;
+    for (TagFSVolume *vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol)) {
+        if (!TagFSVolumeMounted(vol))
+            continue;
+        EscheatSaid said;
+        error_t     one = TagFSEscheat(vol, StorageCallWarrant(ctx), &said);
+        if (one == OK) {
+            all.ranges        += said.ranges;
+            all.files         += said.files;
+            all.blocks        += said.blocks;
+            all.tails         += said.tails;
+            all.digest_ranges += said.digest_ranges;
+            if (rc == ERR_OBJECT_NOT_FOUND)
+                rc = OK;
+        } else if (one != ERR_OBJECT_NOT_FOUND && (rc == OK || rc == ERR_OBJECT_NOT_FOUND)) {
+            rc = one;
+        }
+    }
     if (rc == OK && op->out_crate != CRATE_INDEX_NONE)
-        (void)crate_write(&crates[op->out_crate], ctx, &said, sizeof(said));
+        (void)crate_write(&crates[op->out_crate], ctx, &all, sizeof(all));
     return rc;
 }
 
@@ -272,9 +304,16 @@ int ObjConjugate(const ManifestOp *op, Crate *crates, uint16_t crate_count, cons
     if (op->param_size < sizeof(ask))
         return ERR_INVALID_ARGUMENT;
     memcpy(&ask, op->params, sizeof(ask));
-    error_t rc = TagFSConjugate(TagFSHome(), StorageCallWarrant(ctx), &ask, &said);
+    /* Blocks are laid on another file's of the same volume, or on none. */
+    uint64_t     fid  = ask.fid;
+    uint64_t     onto = 0;
+    TagFSVolume *vol  = TagFSVolumeOfId(ask.fid, &ask.fid);
+    if (!vol || TagFSVolumeOfId(ask.onto, &onto) != vol)
+        return vol ? ERR_INVALID_ARGUMENT : ERR_FILE_NOT_FOUND;
+    ask.onto = onto;
+    error_t rc = TagFSConjugate(vol, StorageCallWarrant(ctx), &ask, &said);
     if (rc == ERR_WOULD_BLOCK && said.why == CONJUGATE_REFUSED)
-        return SettleOpForRoom(op, crates, crate_count, ctx, ask.fid);
+        return SettleOpForRoom(op, crates, crate_count, ctx, vol, fid);
     if (op->out_crate != CRATE_INDEX_NONE)
         (void)crate_write(&crates[op->out_crate], ctx, &said, sizeof(said));
     return rc;
@@ -284,13 +323,16 @@ int ObjWriteSettled(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                     const OpContext *ctx)
 {
     (void)crate_count;
-    uint64_t file_id = op_file_id(op);
-    if (!tagfs_enter(TagFSHome()))
+    uint64_t     file_id = op_file_id(op);
+    uint64_t     own     = 0;
+    TagFSVolume *vol     = SettleOpVolume(file_id, &own);
+    if (!vol)
+        return ERR_FILE_NOT_FOUND;
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
-    uint64_t gen = file_id ? InkGenOf(TagFSHome(), file_id) : InkedGen(TagFSHome());
-    int rc = SettleOpWaitFor(ctx, crates, file_id, gen, SETTLE_OP_SETTLED,
-                             "storage.write.settled");
-    tagfs_leave(TagFSHome());
+    uint64_t gen = own ? InkGenOf(vol, own) : InkedGen(vol);
+    int rc = SettleOpWaitFor(ctx, crates, vol, file_id, gen, SETTLE_OP_SETTLED, "storage.write.settled");
+    tagfs_leave(vol);
     return rc;
 }
 
@@ -318,7 +360,7 @@ int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Cr
     } else if (!ctx || !ctx->proc) {
         SettleUseSayNow(out, ctx, TagFSSettle(TagFSHome()) == OK && UseMemoryKept(TagFSHome(), ticket, said));
     } else {
-        SettleOpWait* s = SettleOpPark(ctx, crates, SETTLE_OP_USE, 0, "system.use");
+        SettleOpWait* s = SettleOpPark(ctx, crates, SETTLE_OP_USE, TagFSHome(), 0, "system.use");
         if (s) {
             s->ticket = ticket;
             s->said   = UseTextHold(said);
@@ -374,13 +416,13 @@ static int SettleOpAskAgain(const ManifestOp *op, Crate *crates, uint16_t crate_
 /* A caller in the kernel with no program to park waits for the cycles in its
  * own call, inside the volume's door, and asks its op again after each. */
 static int SettleOpRoomInCall(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                              const OpContext *ctx)
+                              const OpContext *ctx, TagFSVolume *vol)
 {
     for (;;) {
-        if (!tagfs_enter(TagFSHome()))
+        if (!tagfs_enter(vol))
             return ERR_TAGFS_NOT_INITIALIZED;
-        error_t room = SettleForRoom(TagFSHome());
-        tagfs_leave(TagFSHome());
+        error_t room = SettleForRoom(vol);
+        tagfs_leave(vol);
         if (room != OK)
             return (int)room;
         bool again;
@@ -399,7 +441,7 @@ static void SettleOpRoomCame(SettleWaiter *w, error_t rc)
 {
     SettleOpWait* s = (SettleOpWait*)w;
     s->came = rc;
-    HelmReady(TagFSHome(), &s->service);
+    HelmReady(s->vol, &s->service);
 }
 
 /* Linked for the next cycle's end, inside the volume's door: OK, or — with no
@@ -409,11 +451,11 @@ static void SettleOpRoomCame(SettleWaiter *w, error_t rc)
  * wait the moment it is linked: it is not touched again here. */
 static error_t SettleOpRoomLink(SettleOpWait *s)
 {
-    if (!tagfs_enter(TagFSHome()))
+    if (!tagfs_enter(s->vol))
         return ERR_TAGFS_NOT_INITIALIZED;
-    SettleDemand(TagFSHome(), SETTLE_DEMAND_ROOM);
-    SettleWaitLinkCycle(TagFSHome(), &s->w, SettleOpRoomCame);
-    tagfs_leave(TagFSHome());
+    SettleDemand(s->vol, SETTLE_DEMAND_ROOM);
+    SettleWaitLinkCycle(s->vol, &s->w, SettleOpRoomCame);
+    tagfs_leave(s->vol);
     return OK;
 }
 
@@ -450,7 +492,7 @@ static void SettleOpRoomAgain(HelmWaiter *service)
 }
 
 int SettleOpForRoom(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                    const OpContext *ctx, uint64_t file_id)
+                    const OpContext *ctx, TagFSVolume *vol, uint64_t file_id)
 {
     bool* again = s_asked_again[amp_get_core_index()];
     if (again) {
@@ -468,7 +510,7 @@ int SettleOpForRoom(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     bool parks = program;
 #endif
     if (!parks)
-        return SettleOpRoomInCall(op, crates, crate_count, ctx);
+        return SettleOpRoomInCall(op, crates, crate_count, ctx, vol);
 
     const OpRegistration* reg  = OpRegistryLookup(op->op_kind);
     size_t                size = sizeof(ManifestOp) + op->param_size;
@@ -479,7 +521,7 @@ int SettleOpForRoom(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     SettleOpWait* s;
     if (program) {
-        s = SettleOpPark(ctx, crates, SETTLE_OP_ROOM, file_id, reg->name);
+        s = SettleOpPark(ctx, crates, SETTLE_OP_ROOM, vol, file_id, reg->name);
     } else {
         s = kmalloc(sizeof(SettleOpWait));
         if (s) {
@@ -487,6 +529,7 @@ int SettleOpForRoom(const ManifestOp *op, Crate *crates, uint16_t crate_count,
             s->holder      = reg->name;
             s->kind        = SETTLE_OP_ROOM;
             s->file_id     = file_id;
+            s->vol         = vol;
             s->crates_kbuf = crates;
             s->crate_count = crate_count;
 #ifdef CONFIG_VOLUME_TESTS

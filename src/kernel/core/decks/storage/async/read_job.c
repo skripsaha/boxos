@@ -39,6 +39,7 @@
 
 typedef struct ReadJob {
     TagFSFileHandle *handle;          /* closed at the answer */
+    TagFSVolume     *vol;             /* the handle's volume, which the job reads and holds the door of */
     ReadSink         sink;
     uint64_t         start;           /* the file offset it reads from */
     uint64_t         total;           /* the bytes it reads: the sink's room, or up to the size */
@@ -88,9 +89,9 @@ static void rjob_answer(ReadJob *j, error_t rc)
                 "had landed\n", j->file_id, (unsigned long long)j->start, (unsigned)rc,
                 (unsigned long long)j->landed, (unsigned long long)j->total);
 
-    tagfs_close(TagFSHome(), j->handle);
+    tagfs_close(j->vol, j->handle);
     pmm_free(j->dma_phys, j->dma_blocks);
-    tagfs_leave(TagFSHome());
+    tagfs_leave(j->vol);
 
 #ifdef CONFIG_VOLUME_TESTS
     if (j->stand) {
@@ -138,7 +139,7 @@ static void rjob_answered(uint8_t port, uint8_t slot, error_t status, void *ctx)
     ReadJob *j = (ReadJob *)ctx;
     j->status  = status;
     if (j->at_service)
-        HelmReady(TagFSHome(), &j->service);
+        HelmReady(j->vol, &j->service);
     else
         BatonPass(&j->cq_node);
 }
@@ -168,7 +169,7 @@ static void rjob_step(ReadJob *j)
             rjob_answer(j, OK);
             return;
         }
-        if (TagFSMediumGone(TagFSHome())) {
+        if (TagFSMediumGone(j->vol)) {
             rjob_answer(j, ERR_DEVICE_NOT_READY);
             return;
         }
@@ -193,11 +194,11 @@ static void rjob_step(ReadJob *j)
 
     /* A seat emptied between the look above and the submit refuses it as a
      * seat that is not there: the medium left, and that is the answer. */
-    error_t rc = BoardroomReadAsync(tagfs_get_seat(TagFSHome()), tagfs_block_to_sector(TagFSHome(), j->block),
+    error_t rc = BoardroomReadAsync(tagfs_get_seat(j->vol), tagfs_block_to_sector(j->vol, j->block),
                                     j->count * TAGFS_BLOCK_SECTORS, j->dma_phys, rjob_answered,
                                     j, &j->berth);
     if (rc != OK)
-        rjob_answer(j, TagFSMediumGone(TagFSHome()) ? ERR_DEVICE_NOT_READY : rc);
+        rjob_answer(j, TagFSMediumGone(j->vol) ? ERR_DEVICE_NOT_READY : rc);
 }
 
 /* The run that came in: each block checked against its digest and landed in
@@ -219,7 +220,7 @@ static void rjob_pump(void *job_)
         if ((uint64_t)chunk > j->total - j->landed)
             chunk = (uint32_t)(j->total - j->landed);
         uint64_t       k     = (j->start + j->landed) / TAGFS_BLOCK_SIZE;
-        if (!IntegrityVerify(TagFSHome(), j->block + i, data))
+        if (!IntegrityVerify(j->vol, j->block + i, data))
             rc = ERR_CHECKSUM;
         else if ((rc = ReadSinkBlock(&j->sink, j->landed, j->handle->rec, k, data, off, chunk)) == OK)
             j->landed += chunk;
@@ -254,19 +255,20 @@ int ReadJobSubmit(TagFSFileHandle *handle, const ReadJobAsk *ask, Crate *crates,
     memset(j, 0, sizeof(*j));
     /* The run the seat takes in one command, in one piece, as a command's
      * pages must be: a read that cannot have them stands in its call. */
-    j->dma_blocks = TagFSRunBlocks(TagFSHome());
+    j->vol        = handle->vol;
+    j->dma_blocks = TagFSRunBlocks(j->vol);
     j->dma_phys   = pmm_alloc(j->dma_blocks, PHYS_TAG_DMA32);
     if (!j->dma_phys) {
         kfree(j);
         return ERR_NO_MEMORY;
     }
-    if (!tagfs_enter(TagFSHome())) {
+    if (!tagfs_enter(j->vol)) {
         pmm_free(j->dma_phys, j->dma_blocks);
         kfree(j);
         return ERR_TAGFS_NOT_INITIALIZED;
     }
     if (!stand && !(j->target = process_find_ref(ctx->proc->pid))) {
-        tagfs_leave(TagFSHome());
+        tagfs_leave(j->vol);
         pmm_free(j->dma_phys, j->dma_blocks);
         kfree(j);
         return ERR_INVALID_STATE;
@@ -278,7 +280,7 @@ int ReadJobSubmit(TagFSFileHandle *handle, const ReadJobAsk *ask, Crate *crates,
     j->start      = handle->offset;
     j->total      = ask->sink.bytes < room ? ask->sink.bytes : room;
     j->dma_virt   = (uint8_t *)vmm_phys_to_virt((uintptr_t)j->dma_phys);
-    j->at_service = BoardroomSeatKind(tagfs_get_seat(TagFSHome())) == BOARD_USB;
+    j->at_service = BoardroomSeatKind(tagfs_get_seat(j->vol)) == BOARD_USB;
     j->file_id    = ask->file_id;
     j->out_crate  = ask->out_crate;
     j->waybill    = ask->waybill;

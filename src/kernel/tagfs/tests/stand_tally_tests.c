@@ -696,7 +696,7 @@ static TestResult TestStandTallyLowerDoorsRefused(void)
     TEST_ASSERT_EQ(TagFSWriteRun(vol, block, 1, g_test_buffer, &landed), ERR_TAGFS_READ_ONLY,
                    "the data run door refuses");
     TEST_ASSERT_EQ(landed, 0, "and lands nothing");
-    TEST_ASSERT_EQ(WriteJobStandWriteDoor(block), ERR_TAGFS_READ_ONLY, "the port's write door refuses");
+    TEST_ASSERT_EQ(WriteJobStandWriteDoor(vol, block), ERR_TAGFS_READ_ONLY, "the port's write door refuses");
     TagFSGlassKnocking(false);
     TEST_ASSERT_EQ(TagFSGlassKnocks() - knocks, 4, "each of the four by the glass");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and not one write reached the medium");

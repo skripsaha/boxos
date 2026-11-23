@@ -534,9 +534,8 @@ static void FragOfFile(TagFSVolume* vol, FragCount* frag, uint64_t fid)
  * every step from one of a file's blocks to its next. The files are the live
  * ones a list names, a batch at a time.
  */
-uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps)
+uint32_t tagfs_get_fragmentation_score(TagFSVolume* vol, uint32_t* out_files, uint32_t* out_gaps)
 {
-    TagFSVolume* vol = TagFSHome();
     FragCount frag = { 0, 0, 0 };
     if (out_files)
         *out_files = 0;

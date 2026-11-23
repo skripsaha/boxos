@@ -7,6 +7,7 @@
 #include "boxos_crate.h"
 #include "op_registry.h"
 #include "use_context.h"
+#include "tagfs.h"
 
 /* The storage deck's waits for the volume's Settle (settle_ops.c): anchor and
  * obj.write.settled. The caller waits behind its Chit; a cycle's S6 answers. */
@@ -37,7 +38,8 @@ int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Cr
  * room a Settle cycle gives back, nothing of the operation done — hands it
  * here, with what it was called with, and returns what this returns. The word
  * is no answer: the program is parked behind its Chit (`file_id` the chit's
- * word), the op waits for the next cycle's end, and a service point then asks
+ * word, as the house names the file), the op waits for the end of the next
+ * cycle of `vol` — the volume it asked room of —, and a service point then asks
  * it again through the deck's own handler — the same params, the program's
  * crates — until it answers something else, which is the program's answer. A
  * caller in the kernel with no program to park waits for the cycles in its
@@ -46,7 +48,7 @@ int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Cr
  * made, or the kernel caller's answer.
  */
 int SettleOpForRoom(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                    const OpContext *ctx, uint64_t file_id);
+                    const OpContext *ctx, TagFSVolume *vol, uint64_t file_id);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's caller of an op that waits for room: a caller in the kernel has

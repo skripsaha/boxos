@@ -55,6 +55,20 @@ bool TagFSVolumeMounted(const TagFSVolume* vol)
     return vol->state.initialized;
 }
 
+uint64_t TagFSHouseId(const TagFSVolume* vol, uint64_t fid)
+{
+    return fid ? ((uint64_t)vol->number << TAGFS_VOLUME_FILE_BITS) | fid : 0;
+}
+
+TagFSVolume* TagFSVolumeOfId(uint64_t id, uint64_t* fid)
+{
+    *fid = id & TAGFS_VOLUME_FILES_MOST;
+    if (*fid == 0 || (id & TAGFS_PASSPORT_BIT))
+        return NULL;
+    TagFSVolume* vol = TagFSVolumeNumbered((uint32_t)(id >> TAGFS_VOLUME_FILE_BITS));
+    return vol && vol->state.initialized ? vol : NULL;
+}
+
 TagFSVolume* TagFSVolumeNumbered(uint32_t number)
 {
     for (TagFSVolume* vol = &s_home; vol; vol = TagFSVolumeNext(vol))

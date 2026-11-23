@@ -192,6 +192,40 @@ static size_t tag_list_page_bytes(const uint8_t *page, uint32_t delivered, size_
     return at - STORAGE_TAG_LIST_HEAD;
 }
 
+/* A tag of one owner worn on two volumes is one tag of the house (storage.
+ * tag.list lists it by each): their files summed in the place of the first,
+ * the list's order kept. The entries found by a table of their owner and text,
+ * built once; with no memory for it the list stays as the volumes give it. */
+static size_t tag_list_merged(TagListed *list, size_t listed)
+{
+    size_t cap = 16;
+    while (cap < 2 * listed)
+        cap <<= 1;
+    uint32_t *slot = calloc(cap, sizeof(uint32_t));   /* an entry's place + 1, 0 for none */
+    if (!slot)
+        return listed;
+    size_t kept = 0;
+    for (size_t i = 0; i < listed; i++) {
+        uint64_t hash = 1469598103934665603ull ^ (uint64_t)list[i].Owner;
+        for (const char *c = list[i].Tag; *c; c++)
+            hash = (hash ^ (uint8_t)*c) * 1099511628211ull;
+        for (size_t at = hash & (cap - 1);; at = (at + 1) & (cap - 1)) {
+            if (!slot[at]) {
+                list[kept] = list[i];
+                slot[at]   = (uint32_t)++kept;
+                break;
+            }
+            TagListed *same = &list[slot[at] - 1];
+            if (same->Owner == list[i].Owner && same->System == list[i].System && strcmp(same->Tag, list[i].Tag) == 0) {
+                same->Files += list[i].Files;
+                break;
+            }
+        }
+    }
+    free(slot);
+    return kept;
+}
+
 /* Every page asked for in turn, its records gathered; then the list and the
  * text laid out in one block. */
 static int tag_list_scoped(TagsOf whose, uint8_t scope, const char *without, TagListed **out, size_t *count)
@@ -205,13 +239,13 @@ static int tag_list_scoped(TagsOf whose, uint8_t scope, const char *without, Tag
 
     uint8_t *records = NULL;
     size_t   bytes = 0, listed = 0, text = 0;
-    uint32_t from = 0;
+    uint64_t from = 0;
     int      rc = 0;
     for (;;) {
-        uint8_t head[5 + WHOSE_MOST];
+        uint8_t head[9 + WHOSE_MOST];
         memcpy(head, &from, sizeof(from));
-        head[4] = scope;
-        size_t   head_size   = 5 + whose_put(head + 5, whose);
+        head[8] = scope;
+        size_t   head_size   = 9 + whose_put(head + 9, whose);
         uint16_t params_size = 0;
         uint8_t *params = question_params(head, head_size, without, &params_size);
         if (!params) { rc = -ERR_NO_MEMORY; break; }
@@ -220,9 +254,10 @@ static int tag_list_scoped(TagsOf whose, uint8_t scope, const char *without, Tag
         free(params);
         if (rc != 0) { rc = box_fail(rc); break; }
 
-        uint32_t delivered, next;
+        uint32_t delivered;
+        uint64_t next;
         memcpy(&delivered, page, sizeof(delivered));
-        memcpy(&next, page + 4, sizeof(next));
+        memcpy(&next, page + 8, sizeof(next));
         size_t got = tag_list_page_bytes(page, delivered, &text);
         /* A page cut short, or one that gave nothing and still says there is
          * more from where it was asked, is no answer to go on from. */
@@ -274,7 +309,7 @@ static int tag_list_scoped(TagsOf whose, uint8_t scope, const char *without, Tag
     }
     free(records);
     *out   = list;
-    *count = listed;
+    *count = tag_list_merged(list, listed);
     return 0;
 }
 

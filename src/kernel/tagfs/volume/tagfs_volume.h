@@ -362,7 +362,6 @@ void TagFSVolumeBegin(TagFSVolume* vol);
  * the first time this boot, begun and numbered after the last — NULL when the
  * machine has no memory for it, or the house no number. */
 TagFSVolume* TagFSVolumeTakeIn(const uint8_t uuid[16]);
-TagFSVolume* TagFSVolumeOfUuid(const uint8_t uuid[16]);
 
 /* What the house asks of each volume (tagfs.c): its service pass, an arrival
  * attended, the memory a refused mount waited for come back. */

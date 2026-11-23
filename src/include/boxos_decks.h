@@ -418,24 +418,25 @@
  * refused (ERR_ACCESS_DENIED at the gate, ERR_PERMISSION_DENIED past it).
  * ERR_OBJECT_NOT_FOUND when there is nothing to let go. */
 #define STORAGE_OBJ_ESCHEAT         0x22
-/* tag.list — the tags of `whose` files wear, each with how many files wear it,
- * in the order of the volume's numbers for them. The volume's registry names
- * more than files' tags — a process's, a Touch's, a Bay's, another owner's —
- * and a tag no file wears is left out. params = [u32 from][u8 scope][u8 whose]
- * [tags set aside]: from the tag
- * numbered `from` on (0: the first), the files counted inside the Use Context
+/* tag.list — the tags of `whose` files wear, each with how many files wear it:
+ * every volume of the house in the order of its number, each's tags in the
+ * order of its numbers for them — a tag worn on two volumes is listed by each,
+ * with the files of that volume. A volume's registry names more than files'
+ * tags — a process's, a Touch's, a Bay's, another owner's — and a tag no file
+ * wears is left out. params = [u64 from][u8 scope][u8 whose][tags set aside]:
+ * from the volume numbered from's high 32 bits and its tag numbered by the
+ * low 32 on (0: the first), the files counted inside the Use Context
  * (STORAGE_SCOPE_USE, the files that wear its tags) or on the whole volume,
  * those wearing a tag the comma list after the scope names left uncounted, as
  * a query leaves them out. With STORAGE_TAGS_ALL — every tag its caller may
- * see, each with whose it is — the scope is the whole volume's and no tag is
- * set aside. out_crate = [u32 delivered]
- * [u32 next], then `delivered` records [u32 files][u8 flags][u8 key_len]
- * [u16 value_len][u64 owner][key][value] while they fit, owner as obj.getinfo
- * says; `next` is the number to ask from
- * for the rest, 0 when there are none. A crate too small for even the first
- * record is refused ERR_BUFFER_TOO_SMALL. */
+ * see, each with whose it is — the scope is every volume's whole and no tag
+ * is set aside. out_crate = [u32 delivered][u32 0][u64 next], then
+ * `delivered` records [u32 files][u8 flags][u8 key_len][u16 value_len]
+ * [u64 owner][key][value] while they fit, owner as obj.getinfo says; `next`
+ * is the number to ask from for the rest, 0 when there are none. A crate too
+ * small for even the first record is refused ERR_BUFFER_TOO_SMALL. */
 #define STORAGE_TAG_LIST            0x23
-#define STORAGE_TAG_LIST_HEAD       8u      /* [u32 delivered][u32 next] */
+#define STORAGE_TAG_LIST_HEAD       16u     /* [u32 delivered][u32 0][u64 next] */
 #define STORAGE_TAG_LISTED_HEAD     16u     /* a record before its text */
 #define STORAGE_TAG_LISTED_SYSTEM   0x01u   /* flags: a tag the system keeps */
 /* obj.conjugate — Conjugate, a duplicate laid on the blocks it duplicates:

@@ -31,18 +31,30 @@ static const char s_tags_asked[] = "tags-asked";
 /* A note was left for `owner`: said on the word once for every file of it,
  * whichever of them a running copy of it was started from — none said when
  * the heap gives no room to list them, the note standing all the same. */
-static void StorageAskSaid(uint64_t owner, const OpContext *ctx)
+static void StorageAskSaid(TagFSVolume *vol, uint64_t owner, const OpContext *ctx)
 {
     TouchTag full, bare;
     if (TouchTagResolve(s_tags_asked, sizeof(s_tags_asked) - 1u, &full, &bare) != OK)
         return;
-    uint32_t  want  = TagFSProgramFiles(TagFSHome(), owner, NULL, 0);
+    uint32_t  want  = TagFSProgramFiles(vol, owner, NULL, 0);
     uint64_t *files = want ? kmalloc(sizeof(uint64_t) * want) : NULL;
-    uint32_t  n     = files ? TagFSProgramFiles(TagFSHome(), owner, files, want) : 0;
-    for (uint32_t i = 0; i < n && i < want; i++)
-        TouchPublishPair(full, bare, &files[i], sizeof(files[i]), ctx && ctx->proc ? ctx->proc->pid : 0,
-                         TOUCH_FLAG_TAGFS);
+    uint32_t  n     = files ? TagFSProgramFiles(vol, owner, files, want) : 0;
+    for (uint32_t i = 0; i < n && i < want; i++) {
+        uint64_t file = TagFSHouseId(vol, files[i]);
+        TouchPublishPair(full, bare, &file, sizeof(file), ctx && ctx->proc ? ctx->proc->pid : 0, TOUCH_FLAG_TAGFS);
+    }
     kfree(files);
+}
+
+/* The program a show names (its file's house id) as the caller's volume `vol`
+ * knows it: who it is there — 0 stays 0, every program — or
+ * ERR_FILE_NOT_FOUND for a program named by a file of another volume, which is
+ * nobody on this one. */
+static error_t StorageShowNamed(uint64_t named, TagFSVolume *vol, uint64_t *program)
+{
+    TagFSVolume *where = NULL;
+    *program = StorageProgramNamed(named, &where);
+    return where && where != vol ? ERR_FILE_NOT_FOUND : OK;
 }
 
 /* STORAGE_TAG_SHOW  params: [u8 act][u64 program] — the caller's program
@@ -53,19 +65,23 @@ int ObjTagShow(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
     (void)crates;
     (void)crate_count;
     if (op->param_size < 9) return ERR_INVALID_ARGUMENT;
-    uint8_t  act     = op->params[0];
-    uint64_t program = StorageProgramNamed(param_u64(op, 1));
-    uint64_t self    = StorageReader(ctx);
+    uint8_t      act  = op->params[0];
+    TagFSVolume *vol  = StorageReaderVolume(ctx);
+    uint64_t     self = StorageReader(ctx);
     if (act != STORAGE_SHOW_TO && act != STORAGE_HIDE_FROM && act != STORAGE_ASK_TO_SEE)
         return ERR_INVALID_ARGUMENT;
     if (!self)
         return ERR_TAGFS_NO_OWN_TAGS;
+    uint64_t program;
+    error_t  rc = StorageShowNamed(param_u64(op, 1), vol, &program);
+    if (rc != OK)
+        return rc;
     if (act != STORAGE_ASK_TO_SEE)
-        return TagFSShowTags(TagFSHome(), self, program, act == STORAGE_SHOW_TO);
-    bool    noted = false;
-    error_t rc    = TagFSAskToSee(TagFSHome(), self, program, &noted);
+        return TagFSShowTags(vol, self, program, act == STORAGE_SHOW_TO);
+    bool noted = false;
+    rc = TagFSAskToSee(vol, self, program, &noted);
     if (rc == OK && noted)
-        StorageAskSaid(program, ctx);
+        StorageAskSaid(vol, program, ctx);
     return rc;
 }
 
@@ -80,12 +96,12 @@ typedef struct {
     uint8_t  which;
 } ShownAsk;
 
-static error_t ShownPager(const void *ask, uint64_t from, uint64_t *out, uint32_t room, bool want_total,
-                          TagFSPage *page)
+static error_t ShownPager(TagFSVolume *vol, const void *ask, uint64_t from, uint64_t *out, uint32_t room,
+                          bool want_total, TagFSPage *page)
 {
     const ShownAsk *a = ask;
-    return a->which == STORAGE_SHOWN_TO_ME ? TagFSShownToPage(TagFSHome(), a->self, from, out, room, want_total, page)
-                                           : TagFSAsksPage(TagFSHome(), a->self, from, out, room, want_total, page);
+    return a->which == STORAGE_SHOWN_TO_ME ? TagFSShownToPage(vol, a->self, from, out, room, want_total, page)
+                                           : TagFSAsksPage(vol, a->self, from, out, room, want_total, page);
 }
 
 /* STORAGE_TAG_SHOWN  params: [u8 which][u64 program][u64 from] — out_crate
@@ -97,10 +113,12 @@ int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t  which   = op->params[0];
-    uint64_t program = StorageProgramNamed(param_u64(op, 1));
-    uint64_t from    = op->param_size >= 25 ? param_u64(op, 9) : 0;
-    uint64_t self    = StorageReader(ctx);
+    uint8_t      which   = op->params[0];
+    TagFSVolume *where   = NULL;
+    uint64_t     program = StorageProgramNamed(param_u64(op, 1), &where);
+    uint64_t     from    = op->param_size >= 25 ? param_u64(op, 9) : 0;
+    TagFSVolume *vol     = StorageReaderVolume(ctx);
+    uint64_t     self    = StorageReader(ctx);
     if (which != STORAGE_SHOWN_TO_ME && which != STORAGE_SHOWN_BY && which != STORAGE_ASKS_TO_SEE)
         return ERR_INVALID_ARGUMENT;
     if (which == STORAGE_SHOWN_BY && program != self && !StoragePersonSays(ctx, false))
@@ -115,9 +133,12 @@ int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const
     error_t  rc       = OK;
     if (which == STORAGE_SHOWN_BY) {
         /* A program's own list, whole: from `from` on, as the others page. */
-        uint64_t *all   = NULL;
-        uint32_t  count = 0;
-        rc = TagFSShownBy(TagFSHome(), program, &all, &count);
+        uint64_t    *all   = NULL;
+        uint32_t     count = 0;
+        TagFSVolume *on    = where ? where : vol;
+        rc = on ? TagFSShownBy(on, program, &all, &count) : ERR_FILE_NOT_FOUND;
+        for (uint32_t i = 0; rc == OK && i < count; i++)
+            all[i] = all[i] & TAGFS_PASSPORT_BIT ? all[i] : TagFSHouseId(on, all[i]);
         uint32_t at = 0;
         while (rc == OK && at < count && all[at] < from)
             at++;
@@ -128,7 +149,8 @@ int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const
         kfree(all);
     } else {
         const ShownAsk ask = { self, which };
-        rc = StorageAnswerPages(ShownPager, &ask, from, out, ctx, piece, STORAGE_SHOWN_ANSWER_PIECE, hdr);
+        rc = vol ? StorageAnswerPages(ShownPager, &ask, vol, from, out, ctx, piece, STORAGE_SHOWN_ANSWER_PIECE, hdr)
+                 : ERR_TAGFS_NO_OWN_TAGS;
     }
     if (rc != OK) return rc;
 

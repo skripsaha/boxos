@@ -62,7 +62,7 @@ typedef enum {
 /* What a caller asks of a job. */
 typedef struct {
     WriteJobKind kind;
-    uint64_t     file_id;
+    uint64_t     file_id;       /* as the house names it (TagFSHouseId) */
     PlotSource   source;        /* WRITE: the bytes, their pages brought in (PlotSourceBringIn) */
     uint64_t     offset;        /* WRITE: where the write begins ... */
     bool         append;        /* ... or at the file's size */
@@ -124,7 +124,9 @@ typedef struct WriteJob {
     bool              deferred;          /* the caller is parked: the answer is pushed */
     process_t        *target;            /* pinned for the job's life; NULL for a kernel caller */
     const struct OpContext *ctx;         /* the caller's call, while the job runs inside it */
-    uint64_t          file_id;
+    uint64_t          file_id;           /* as the house names it */
+    TagFSVolume      *vol;               /* its volume, and the volume's own id of it */
+    uint64_t          fid;
     TagFSFileHandle  *handle;
     Crate            *out_crate;
 
@@ -242,10 +244,10 @@ typedef struct WriteJobStandAnswer {
     bool              through_port;  /* the job went through the port to its end */
 } WriteJobStandAnswer;
 
-/* The port's own write door knocked at by the stand, with no job behind it: a
- * volume under glass answers it before the job is looked at (write_job_port.c,
- * the door every write of a job's blocks goes through). */
-error_t WriteJobStandWriteDoor(uint64_t block);
+/* The port's own write door of volume `vol` knocked at by the stand, with no
+ * job behind it: a volume under glass answers it before the job is looked at
+ * (write_job_port.c, the door every write of a job's blocks goes through). */
+error_t WriteJobStandWriteDoor(TagFSVolume *vol, uint64_t block);
 #endif
 
 /* A storage op that ran synchronously answered on the ferry channel its

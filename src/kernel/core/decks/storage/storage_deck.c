@@ -13,11 +13,42 @@
 #include "klib.h"
 #include "touch.h"
 
-void StorageFileSays(const TagFSMetadata *meta, const void *event, size_t size, uint32_t pid)
+/* Tag `tag_id` of volume `vol` as the machine's language names it — the home
+ * volume's id of the person's tag of that text (TagFSTagIsPersons) — or
+ * TAGFS_INVALID_TAG_ID: a program's own, an id the volume has not, a text the
+ * home volume has never been told, which nothing listens for. The text is
+ * copied into `text` (TAG_TEXT_WIDTH + 1 bytes) out of the volume's door
+ * before the home volume is asked: no work holds two volumes at once. */
+static uint32_t StorageHomeTag(TagFSVolume *vol, uint32_t tag_id, char *text)
 {
-    for (uint32_t i = 0; i < meta->tag_count; i++)
-        if (TagFSTagIsPersons(meta->tag_ids[i]))
-            TouchPublishId(meta->tag_ids[i], event, size, pid, TOUCH_FLAG_TAGFS);
+    size_t      len = 0;
+    TagSpelling tag;
+    TagOwner    owner;
+    if (!tagfs_enter(vol))
+        return TAGFS_INVALID_TAG_ID;
+    if (TagFSTagSpelling(vol, tag_id, &tag, NULL, &owner) && owner.kind == TAG_OWNER_PERSON &&
+        (len = TagSpellingTextLength(&tag)) <= TAG_TEXT_WIDTH)
+        TagSpellingText(&tag, text);
+    else
+        len = 0;
+    tagfs_leave(vol);
+    if (len == 0 || TagSpell(text, len, &tag) != OK)
+        return TAGFS_INVALID_TAG_ID;
+    return TagFSLookupSpelling(TagFSHome(), &tag);
+}
+
+void StorageFileSays(TagFSVolume *vol, const TagFSMetadata *meta, const void *event, size_t size, uint32_t pid)
+{
+    /* Another volume's tags are spoken through their text: one buffer for it,
+     * none at all on the home volume, whose ids are the language itself. */
+    bool  home = vol == TagFSHome();
+    char *text = home || !meta->tag_count ? NULL : kmalloc(TAG_TEXT_WIDTH + 1);
+    for (uint32_t i = 0; i < meta->tag_count && (home || text); i++) {
+        uint32_t id = home ? meta->tag_ids[i] : StorageHomeTag(vol, meta->tag_ids[i], text);
+        if (id != TAGFS_INVALID_TAG_ID && TagFSTagIsPersons(id))
+            TouchPublishId(id, event, size, pid, TOUCH_FLAG_TAGFS);
+    }
+    kfree(text);
 
     size_t   lengths[2];
     uint32_t words = TagFSNameWords(meta->filename, strlen(meta->filename), lengths);

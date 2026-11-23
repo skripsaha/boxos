@@ -108,7 +108,7 @@ typedef struct HelmStandHold {
 /* `w`, the holder of the file's Helm, listed for a service point (HelmReady)
  * by the give-up itself (HelmVacate) — at once when the file is given up
  * already. `hold` is the holder's until it is listed. No TagFS lock held. */
-void     HelmReadyOnceVacated(HelmStandHold* hold, OpenFileEntry* ofe, HelmWaiter* w);
+void     HelmReadyOnceVacated(TagFSVolume* vol, HelmStandHold* hold, OpenFileEntry* ofe, HelmWaiter* w);
 #endif
 
 /* A waiter handed the Helm that does its work synchronously: listed, and run

@@ -415,40 +415,46 @@ static TestResult TestStandShowJudge(void)
     OpContext      ctx    = StandShowCaller(vol, s.editor, AUTH_TAG_APP);
     const TagOwner own    = TagOwnerProgram(s.editor);
     const TagOwner player = TagOwnerProgram(s.player);
-    TEST_ASSERT(StorageMaySpeak(&ctx, own, STORAGE_SEE) == OK && StorageMaySpeak(&ctx, own, STORAGE_PUT) == OK &&
-                StorageMaySpeak(&ctx, own, STORAGE_TAKE) == OK, "the editor speaks its own tags every way");
-    TEST_ASSERT(StorageMaySpeak(&ctx, player, STORAGE_SEE) == ERR_ACCESS_DENIED &&
-                StorageMaySpeak(&ctx, player, STORAGE_PUT) == ERR_ACCESS_DENIED &&
-                StorageMaySpeak(&ctx, player, STORAGE_TAKE) == ERR_ACCESS_DENIED,
+    TEST_ASSERT(StorageMaySpeak(&ctx, vol, own, STORAGE_SEE) == OK && StorageMaySpeak(&ctx, vol, own, STORAGE_PUT) == OK &&
+                StorageMaySpeak(&ctx, vol, own, STORAGE_TAKE) == OK, "the editor speaks its own tags every way");
+    TEST_ASSERT(StorageMaySpeak(&ctx, vol, player, STORAGE_SEE) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, vol, player, STORAGE_PUT) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, vol, player, STORAGE_TAKE) == ERR_ACCESS_DENIED,
                 "the player's tags it neither sees, puts on nor takes off");
-    TEST_ASSERT(StorageMaySpeak(&ctx, TagOwnerPerson(), STORAGE_SEE) == ERR_ACCESS_DENIED,
+    TEST_ASSERT(StorageMaySpeak(&ctx, vol, TagOwnerPerson(), STORAGE_SEE) == ERR_ACCESS_DENIED,
                 "nor sees the person's, its box asking nothing");
     TEST_ASSERT_OK(TagFSShowTags(vol, s.player, s.editor, true), "the player shows its tags to the editor");
-    TEST_ASSERT(StorageMaySpeak(&ctx, player, STORAGE_SEE) == OK &&
-                StorageMaySpeak(&ctx, player, STORAGE_PUT) == ERR_ACCESS_DENIED &&
-                StorageMaySpeak(&ctx, player, STORAGE_TAKE) == ERR_ACCESS_DENIED,
+    TEST_ASSERT(StorageMaySpeak(&ctx, vol, player, STORAGE_SEE) == OK &&
+                StorageMaySpeak(&ctx, vol, player, STORAGE_PUT) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, vol, player, STORAGE_TAKE) == ERR_ACCESS_DENIED,
                 "shown them, the editor sees them, and still puts on and takes off none");
     ctx = StandShowCaller(vol, s.editor, AUTH_TAG_APP | AUTH_TAG_SEE_TAGS);
-    TEST_ASSERT(StorageMaySpeak(&ctx, TagOwnerProgram(s.converter), STORAGE_SEE) == OK &&
-                StorageMaySpeak(&ctx, TagOwnerPerson(), STORAGE_SEE) == OK &&
-                StorageMaySpeak(&ctx, TagOwnerProgram(s.converter), STORAGE_TAKE) == ERR_ACCESS_DENIED &&
-                StorageMaySpeak(&ctx, TagOwnerPerson(), STORAGE_PUT) == ERR_ACCESS_DENIED,
+    TEST_ASSERT(StorageMaySpeak(&ctx, vol, TagOwnerProgram(s.converter), STORAGE_SEE) == OK &&
+                StorageMaySpeak(&ctx, vol, TagOwnerPerson(), STORAGE_SEE) == OK &&
+                StorageMaySpeak(&ctx, vol, TagOwnerProgram(s.converter), STORAGE_TAKE) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, vol, TagOwnerPerson(), STORAGE_PUT) == ERR_ACCESS_DENIED,
                 "the person's eyes see every program's tags and the person's, and change none");
     ctx = StandShowCaller(vol, s.editor, AUTH_TAG_APP | AUTH_TAG_CHANGE_TAGS);
-    TEST_ASSERT(StorageMaySpeak(&ctx, TagOwnerProgram(s.converter), STORAGE_TAKE) == OK &&
-                StorageMaySpeak(&ctx, TagOwnerProgram(s.converter), STORAGE_PUT) == ERR_ACCESS_DENIED &&
-                StorageMaySpeak(&ctx, TagOwnerPerson(), STORAGE_PUT) == OK,
+    TEST_ASSERT(StorageMaySpeak(&ctx, vol, TagOwnerProgram(s.converter), STORAGE_TAKE) == OK &&
+                StorageMaySpeak(&ctx, vol, TagOwnerProgram(s.converter), STORAGE_PUT) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, vol, TagOwnerPerson(), STORAGE_PUT) == OK,
                 "the person's hands take a program's mark off, put none on, and change the person's");
     ctx = StandShowCaller(vol, 0, AUTH_TAG_APP);
-    TEST_ASSERT(StorageMaySpeak(&ctx, TagOwnerProgram(0), STORAGE_SEE) == OK &&
-                StorageMaySpeak(&ctx, TagOwnerProgram(0), STORAGE_PUT) == ERR_TAGFS_NO_OWN_TAGS &&
-                StorageMaySpeak(&ctx, player, STORAGE_SEE) == ERR_ACCESS_DENIED,
+    TEST_ASSERT(StorageMaySpeak(&ctx, vol, TagOwnerProgram(0), STORAGE_SEE) == OK &&
+                StorageMaySpeak(&ctx, vol, TagOwnerProgram(0), STORAGE_PUT) == ERR_TAGFS_NO_OWN_TAGS &&
+                StorageMaySpeak(&ctx, vol, player, STORAGE_SEE) == ERR_ACCESS_DENIED,
                 "a program started from bytes sees its own tags — none — puts none on, and is shown none");
     ctx = StandShowCaller(vol, s.editor, AUTH_TAG_APP);
+    /* A program file's id names it on its own volume alone (StorageSelfOn):
+     * one started from another volume speaks its own words here as nobody's
+     * (StorageOwnerOn) — none to put on — and the file its id would name here
+     * is another program's. */
     s_show_cabin.program_volume[0] ^= 0xFFu;
-    TEST_ASSERT(StorageMaySpeak(&ctx, own, STORAGE_PUT) == ERR_TAGFS_NO_OWN_TAGS &&
-                StorageMaySpeak(&ctx, player, STORAGE_SEE) == ERR_ACCESS_DENIED,
-                "nor one started from another volume, whose file this one's id does not name");
+    TEST_ASSERT(StorageMaySpeak(&ctx, vol, TagOwnerProgram(0), STORAGE_PUT) == ERR_TAGFS_NO_OWN_TAGS &&
+                StorageMaySpeak(&ctx, vol, own, STORAGE_PUT) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, vol, player, STORAGE_SEE) == ERR_ACCESS_DENIED,
+                "nor one started from another volume: its own words here are nobody's, and the file its id would "
+                "name here is another program's, whose tags it puts none of and is shown none of");
 out:
     StandShowClean(vol, &s);
     return verdict;
@@ -465,7 +471,7 @@ static TestResult TestStandShowViewAll(void)
     TEST_ASSERT_OK(TagFSShowTags(vol, s.player, s.editor, true), "the player shows its tags to the editor");
     TEST_ASSERT_OK(TagFSShowTags(vol, s.converter, 0, true), "the converter to every program");
     OpContext ctx = StandShowCaller(vol, s.editor, AUTH_TAG_APP);
-    TEST_ASSERT_OK(StorageViewAll(&ctx, &view, &shown), "the editor's view of every owner it may see");
+    TEST_ASSERT_OK(StorageViewAll(&ctx, vol, &view, &shown), "the editor's view of every owner it may see");
     TEST_ASSERT(TagViewLets(&view, TagOwnerProgram(s.editor)) && TagViewLets(&view, TagOwnerProgram(s.player)) &&
                 TagViewLets(&view, TagOwnerProgram(s.converter)), "its own, and those shown it by name and to all");
     TEST_ASSERT(!TagViewLets(&view, TagOwnerProgram(s.other)) && !TagViewLets(&view, TagOwnerPerson()),
@@ -473,7 +479,7 @@ static TestResult TestStandShowViewAll(void)
     kfree(shown);
     shown = NULL;
     ctx = StandShowCaller(vol, s.editor, AUTH_TAG_APP | AUTH_TAG_SEE_TAGS);
-    TEST_ASSERT_OK(StorageViewAll(&ctx, &view, &shown), "the view with the person's eyes");
+    TEST_ASSERT_OK(StorageViewAll(&ctx, vol, &view, &shown), "the view with the person's eyes");
     TEST_ASSERT(TagViewLets(&view, TagOwnerProgram(s.other)) && TagViewLets(&view, TagOwnerPerson()),
                 "every program's and the person's");
 out:

@@ -241,8 +241,9 @@ int file_span(file_id_t file_id, uint64_t size, uint32_t flags);
 int tag_add(TagsOf whose, file_id_t file_id, const char* tag);
 int tag_remove(TagsOf whose, file_id_t file_id, const char* key);
 
-/* A tag files wear, and how many of them wear it: one entry of the volume's
- * own list of its tags (storage.tag.list), not a walk of its files. */
+/* A tag files wear, and how many of them wear it: one entry of the house's
+ * list of its tags — each volume's own (storage.tag.list), a tag of one owner
+ * worn on several volumes once, their files summed — not a walk of files. */
 typedef struct {
     char     *Tag;      /* "key" or "key:value", as the volume spells it */
     uint32_t  Files;    /* how many files wear it — inside the Use Context, of its files */

@@ -16,6 +16,20 @@ TagFSVolume* TagFSVolumeNumbered(uint32_t number);
 uint32_t     TagFSVolumeNumber(const TagFSVolume* vol);
 bool         TagFSVolumeMounted(const TagFSVolume* vol);
 
+/* A file's id as the house names it — what every program holds: its volume's
+ * number above the volume's own id of it (tagfs_constants.h,
+ * TAGFS_VOLUME_FILE_BITS), so the home volume's files keep the ids their
+ * volume gives. TagFSHouseId: the house's id of file `fid` of `vol`.
+ * TagFSVolumeOfId: the mounted volume a house id names, and the volume's own
+ * id in *fid — NULL when the house numbers no such volume, it is not
+ * mounted, or the id is no file's (0, or a passport). */
+uint64_t     TagFSHouseId(const TagFSVolume* vol, uint64_t fid);
+TagFSVolume* TagFSVolumeOfId(uint64_t id, uint64_t* fid);
+
+/* The volume of the house that calls itself `uuid` (its Deed's), mounted or
+ * not; NULL when the house holds none. */
+TagFSVolume* TagFSVolumeOfUuid(const uint8_t uuid[16]);
+
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
 #include "tagfs_constants.h"
@@ -765,7 +779,7 @@ error_t  tagfs_defrag_file(TagFSVolume* vol, uint64_t file_id);
  * beginning where the one before it ends — rounded up, so one gap never reads
  * as none. The live files counted and the gaps found are said through
  * out_files and out_gaps when they are not NULL. */
-uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps);
+uint32_t tagfs_get_fragmentation_score(TagFSVolume* vol, uint32_t* out_files, uint32_t* out_gaps);
 #ifdef CONFIG_VOLUME_TESTS
 /* One record's share of that score, as the walk of the live files counts it:
  * the gaps a read of it seeks across, and the steps between its blocks of
@@ -846,13 +860,13 @@ error_t  TagFSInternOwned(TagFSVolume* vol, TagOwner owner, const TagSpelling* t
  * the volume has no such tag, or there is no volume. */
 size_t   tagfs_tag_text(TagFSVolume* vol, uint32_t tag_id, char* out, size_t out_size);
 
-/* Whether program `owner` (TagOwner) is on the volume of the house `volume`
- * names (its Deed's uuid) — the one the program was started from — so that
- * its own tags are its: a signed program's passport while a file of it is
- * there, live or kept deleted; a program named by its file while the volume
- * holds that file, holding no signed program since. False when the house
- * holds no such volume, or it is not mounted. */
-bool     TagFSHoldsProgram(const uint8_t volume[16], uint64_t owner);
+/* Whether program `owner` (TagOwner) is on volume `vol`, so that its own
+ * tags there are its: a signed program's passport — the same program on every
+ * volume — while a file of it is there, live or kept deleted; a program named
+ * by its file, which names it on that file's volume alone, while the volume
+ * holds that file, holding no signed program since. False with the volume not
+ * mounted. */
+bool     TagFSHoldsProgram(TagFSVolume* vol, uint64_t owner);
 
 /* Who a program is, as its own tags are owned (TagOwner): a signed program
  * its passport (box_trust.h, bit 63 set), any other the file it is. Programs

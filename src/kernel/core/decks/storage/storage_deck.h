@@ -46,8 +46,10 @@ error_t StorageDeckRegister(void);
  * answers to (the whole name and its stem, the name index's), so a program
  * that watches the files it knows by name hears them without the name being a
  * tag of the file. The one fan-out of the deck's file events: what the
- * listeners hear is the same whichever road changed the file. `meta` is the
- * file's card; `pid` the caller who made the change, 0 for none. */
-void    StorageFileSays(const TagFSMetadata *meta, const void *event, size_t size, uint32_t pid);
+ * listeners hear is the same whichever road changed the file, and on
+ * whichever volume — a file's tags spoken in the machine's language, the home
+ * volume's ids (storage_deck.c). `meta` is the card of a file of `vol`; `pid`
+ * the caller who made the change, 0 for none. Outside the volume's door. */
+void    StorageFileSays(TagFSVolume *vol, const TagFSMetadata *meta, const void *event, size_t size, uint32_t pid);
 
 #endif /* STORAGE_DECK_H */

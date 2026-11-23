@@ -78,6 +78,7 @@ typedef struct OpenFileEntry {
  * closed (helm.h). `warrant` is the caller's (InkWarrant): what the handle's
  * work may change, set by whoever opened it for a program, none from the open. */
 typedef struct TagFSFileHandle {
+    TagFSVolume* vol;            /* the volume of the file, which `file_id` is an id of */
     uint64_t    file_id;
     uint32_t    flags;
     InkWarrant  warrant;

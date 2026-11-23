@@ -2168,6 +2168,7 @@ static TagFSFileHandle *tagfs_open_inside(TagFSVolume* vol, uint64_t file_id, ui
         return NULL;
     }
     memset(handle, 0, sizeof(*handle));
+    handle->vol     = vol;
     handle->file_id = file_id;
     handle->flags   = flags;
     handle->ofe     = ofe;
@@ -2429,9 +2430,8 @@ size_t tagfs_tag_text(TagFSVolume* vol, uint32_t tag_id, char *out, size_t out_s
     return len;
 }
 
-bool TagFSHoldsProgram(const uint8_t volume[16], uint64_t owner)
+bool TagFSHoldsProgram(TagFSVolume* vol, uint64_t owner)
 {
-    TagFSVolume* vol = volume ? TagFSVolumeOfUuid(volume) : NULL;
     if (!vol || owner == 0 || !tagfs_enter(vol))
         return false;
     bool holds = FileMapProgramFiles(vol->state.files, owner, NULL, 0, NULL) > 0;

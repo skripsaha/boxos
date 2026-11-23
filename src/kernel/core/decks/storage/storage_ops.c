@@ -162,10 +162,12 @@ static int ObjRead(const ManifestOp *op,
 
     /* A file its book holds locked is not a file that is not there: it lies
      * in a rotten range of the Tally, or against the book's own shape. */
-    TagFSFileHandle *handle = tagfs_open(TagFSHome(), file_id, TAGFS_HANDLE_READ);
+    uint64_t         own    = 0;
+    TagFSVolume     *vol    = TagFSVolumeOfId(file_id, &own);
+    TagFSFileHandle *handle = vol ? tagfs_open(vol, own, TAGFS_HANDLE_READ) : NULL;
     if (!handle)
-        return storage_op_fail(ctx, crates, TagFSFileLocked(TagFSHome(), file_id) ? ERR_TAGFS_CORRUPTED
-                                                                      : ERR_FILE_NOT_FOUND, waybill);
+        return storage_op_fail(ctx, crates, vol && TagFSFileLocked(vol, own) ? ERR_TAGFS_CORRUPTED
+                                                                         : ERR_FILE_NOT_FOUND, waybill);
     handle->offset = offset;
 
     /* Where the bytes land: the program's pages, or — for a kernel caller
@@ -184,13 +186,13 @@ static int ObjRead(const ManifestOp *op,
     }
 
     if (offset < handle->file_size && ctx && ctx->proc &&
-        ReadJobSeatRunsAsync(tagfs_get_seat(TagFSHome())) &&
+        ReadJobSeatRunsAsync(tagfs_get_seat(vol)) &&
         ReadJobSubmit(handle, &ask, crates, ctx) == ERR_WOULD_BLOCK)
         return ERR_WOULD_BLOCK;
 
     uint64_t got = 0;
-    error_t  rc  = TagFSReadInto(TagFSHome(), handle, &ask.sink, &got);
-    tagfs_close(TagFSHome(), handle);
+    error_t  rc  = TagFSReadInto(vol, handle, &ask.sink, &got);
+    tagfs_close(vol, handle);
     out->size = got;
 
     /* Ф26e: a ferry read that stood in its call must still be answered on the
@@ -285,9 +287,12 @@ static int ObjDelete(const ManifestOp *op,
 {
     if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
 
-    int rc = tagfs_delete_file(TagFSHome(), param_u64(op, 0), StorageCallWarrant(ctx));
+    uint64_t     own = 0;
+    TagFSVolume *vol = TagFSVolumeOfId(param_u64(op, 0), &own);
+    if (!vol) return ERR_FILE_NOT_FOUND;
+    int rc = tagfs_delete_file(vol, own, StorageCallWarrant(ctx));
     if (-rc == ERR_WOULD_BLOCK)
-        return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));
+        return SettleOpForRoom(op, crates, crate_count, ctx, vol, param_u64(op, 0));
     return rc == 0 ? OK : -rc;
 }
 
@@ -304,9 +309,12 @@ static int ObjKeep(const ManifestOp *op, Crate *crates, uint16_t crate_count, co
 {
     if (op->param_size < 16) return ERR_INVALID_ARGUMENT;
 
-    int rc = tagfs_keep_file(TagFSHome(), param_u64(op, 0), param_u64(op, 8), StorageCallWarrant(ctx));
+    uint64_t     own = 0;
+    TagFSVolume *vol = TagFSVolumeOfId(param_u64(op, 0), &own);
+    if (!vol) return ERR_FILE_NOT_FOUND;
+    int rc = tagfs_keep_file(vol, own, param_u64(op, 8), StorageCallWarrant(ctx));
     if (-rc == ERR_WOULD_BLOCK)
-        return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));
+        return SettleOpForRoom(op, crates, crate_count, ctx, vol, param_u64(op, 0));
     return rc == 0 ? OK : -rc;
 }
 
@@ -316,7 +324,10 @@ static int ObjRestore(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     (void)crate_count;
     if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
 
-    int rc = tagfs_restore_file(TagFSHome(), param_u64(op, 0), StorageCallWarrant(ctx));
+    uint64_t     own = 0;
+    TagFSVolume *vol = TagFSVolumeOfId(param_u64(op, 0), &own);
+    if (!vol) return ERR_FILE_NOT_FOUND;
+    int rc = tagfs_restore_file(vol, own, StorageCallWarrant(ctx));
     return rc == 0 ? OK : -rc;
 }
 
@@ -376,11 +387,11 @@ typedef struct {
     uint32_t       length;
 } HeadAsk;
 
-static error_t HeadPager(const void *ask, uint64_t from, uint64_t *out, uint32_t room, bool want_total,
-                         TagFSPage *page)
+static error_t HeadPager(TagFSVolume *vol, const void *ask, uint64_t from, uint64_t *out, uint32_t room,
+                         bool want_total, TagFSPage *page)
 {
     const HeadAsk *h = ask;
-    return TagFSStartingWithPage(TagFSHome(), h->bytes, h->length, from, out, room, want_total, page);
+    return TagFSStartingWithPage(vol, h->bytes, h->length, from, out, room, want_total, page);
 }
 
 /* STORAGE_HEAD_QUERY  in_crate: the bytes a file begins with, 1 to
@@ -404,7 +415,7 @@ static int ObjHeadQuery(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     uint64_t      piece[STORAGE_HEAD_PIECE];
     uint32_t      hdr[2] = { 0, 0 };   /* delivered, total */
     const HeadAsk ask    = { bytes, (uint32_t)in->size };
-    error_t       rc     = StorageAnswerPages(HeadPager, &ask, 1, out, ctx, piece, STORAGE_HEAD_PIECE, hdr);
+    error_t       rc     = StorageAnswerPages(HeadPager, &ask, NULL, 1, out, ctx, piece, STORAGE_HEAD_PIECE, hdr);
     crate_buf_free(bytes);
     if (rc != OK) return rc;
     int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));
@@ -432,9 +443,11 @@ static int ObjRename(const ManifestOp *op,
 
     /* The volume's own answer. Room on its way — room on the ribbon for the
      * rename's stitch — is waited for (SettleOpForRoom). */
-    int rc = tagfs_rename_file(TagFSHome(), file_id, name);
+    uint64_t     own = 0;
+    TagFSVolume *vol = TagFSVolumeOfId(file_id, &own);
+    int          rc  = vol ? tagfs_rename_file(vol, own, name) : -ERR_FILE_NOT_FOUND;
     if (-rc == ERR_WOULD_BLOCK)
-        return SettleOpForRoom(op, crates, crate_count, ctx, file_id);
+        return SettleOpForRoom(op, crates, crate_count, ctx, vol, file_id);
     return rc == 0 ? OK : -rc;
 }
 

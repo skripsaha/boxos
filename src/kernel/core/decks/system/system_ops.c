@@ -2169,7 +2169,7 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
     uint32_t total_files = 0;
     uint32_t total_gaps  = 0;
-    uint32_t score = tagfs_get_fragmentation_score(&total_files, &total_gaps);
+    uint32_t score = tagfs_get_fragmentation_score(TagFSHome(), &total_files, &total_gaps);
 
     uint8_t blob[12];
     memcpy(blob +  0, &score,        sizeof(uint32_t));
