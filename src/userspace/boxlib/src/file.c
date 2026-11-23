@@ -314,14 +314,21 @@ typedef struct {
     const char *without;    /* tags set aside; NULL or "" for none */
     uint8_t     scope;
     const char *tags;       /* the name query's: tags worn too; NULL or "" for none */
+    uint32_t    on;         /* the volume asked of alone, its number + 1; 0 for every volume of the house */
 } Question;
 
 static int ask_files(const Question *question, file_id_t *file_ids, size_t max_files, uint32_t *out_total)
 {
     const char *without = question->without;
     const char *text    = question->text;
-    uint8_t     head[1 + WHOSE_MOST] = { question->scope };
+    uint8_t     head[1 + WHOSE_MOST + 4] = { question->scope };
     size_t      head_size = 1 + whose_put(head + 1, question->whose);
+    if (question->on) {
+        uint32_t volume = question->on - 1u;
+        head[0] |= STORAGE_SCOPE_ONE_VOLUME;
+        memcpy(head + head_size, &volume, sizeof(volume));
+        head_size += sizeof(volume);
+    }
     if (max_files > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
     if (max_files > (UINT32_MAX - 8u) / sizeof(file_id_t)) return -ERR_INVALID_ARGUMENT;
 
@@ -526,13 +533,13 @@ int tag_list_everywhere(TagsOf whose, const char *without, TagListed **out, size
 
 int query(TagsOf whose, const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL, 0 };
     return ask_files(&question, file_ids, max_files, NULL);
 }
 
 int query_everywhere(TagsOf whose, const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL, 0 };
     return ask_files(&question, file_ids, max_files, NULL);
 }
 
@@ -563,32 +570,32 @@ static int ask_all(const Question *question, file_id_t **out_ids)
 
 int query_all(TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
-    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL, 0 };
     return ask_all(&question, out_ids);
 }
 
 int query_all_everywhere(TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
-    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL, 0 };
     return ask_all(&question, out_ids);
 }
 
 int query_deleted(TagsOf whose, const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_DELETED, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_DELETED, NULL, 0 };
     return ask_files(&question, file_ids, max_files, NULL);
 }
 
 int query_all_deleted(TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
-    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_DELETED, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_DELETED, NULL, 0 };
     return ask_all(&question, out_ids);
 }
 
 int query_name_all(TagsOf whose, const char *word, const char *tags, const char *without, file_id_t **out_ids)
 {
     if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    Question question = { STORAGE_NAME_QUERY, whose, word, without, STORAGE_SCOPE_USE, tags };
+    Question question = { STORAGE_NAME_QUERY, whose, word, without, STORAGE_SCOPE_USE, tags, 0 };
     return ask_all(&question, out_ids);
 }
 
@@ -596,21 +603,30 @@ int query_name_all_everywhere(TagsOf whose, const char *word, const char *tags, 
                               file_id_t **out_ids)
 {
     if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    Question question = { STORAGE_NAME_QUERY, whose, word, without, STORAGE_SCOPE_EVERYWHERE, tags };
+    Question question = { STORAGE_NAME_QUERY, whose, word, without, STORAGE_SCOPE_EVERYWHERE, tags, 0 };
     return ask_all(&question, out_ids);
 }
 
-int query_word_all(TagsOf whose, const char *word, file_id_t **out_ids)
+int query_all_on(uint32_t volume, TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
+{
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL, volume + 1u };
+    return ask_all(&question, out_ids);
+}
+
+/* The files `word` finds as a tag and as a name, in `on` (a Question's). */
+static int word_all(TagsOf whose, const char *word, uint32_t on, file_id_t **out_ids)
 {
     if (!out_ids) return -ERR_INVALID_ARGUMENT;
     *out_ids = NULL;
     if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
 
+    const Question by_tag  = { STORAGE_TAG_QUERY, whose, word, NULL, STORAGE_SCOPE_USE, NULL, on };
+    const Question by_name = { STORAGE_NAME_QUERY, whose, word, NULL, STORAGE_SCOPE_USE, NULL, on };
     file_id_t *worn = NULL;
-    int worn_count = query_all(whose, word, NULL, &worn);
+    int worn_count = ask_all(&by_tag, &worn);
     if (worn_count < 0) return worn_count;
     file_id_t *called = NULL;
-    int called_count = query_name_all(whose, word, NULL, NULL, &called);
+    int called_count = ask_all(&by_name, &called);
     if (called_count < 0) { free(worn); return called_count; }
 
     file_id_t *both = malloc(((size_t)worn_count + (size_t)called_count + 1u) * sizeof(file_id_t));
@@ -626,6 +642,16 @@ int query_word_all(TagsOf whose, const char *word, file_id_t **out_ids)
     if (n == 0) { free(both); return 0; }
     *out_ids = both;
     return n;
+}
+
+int query_word_all(TagsOf whose, const char *word, file_id_t **out_ids)
+{
+    return word_all(whose, word, 0, out_ids);
+}
+
+int query_word_all_on(uint32_t volume, TagsOf whose, const char *word, file_id_t **out_ids)
+{
+    return word_all(whose, word, volume + 1u, out_ids);
 }
 
 /* =========================================================================
@@ -937,16 +963,18 @@ int file_restore(file_id_t file_id)
  *  WHAT A FILE IS: THE FILES THAT BEGIN WITH GIVEN BYTES
  * ========================================================================= */
 
-/* The files beginning with `length` bytes at `bytes`, into `ids` — room for
- * `room` — *total how many there are. 0, or a negative -error_t. */
-static int files_starting_page(const void *bytes, size_t length, file_id_t *ids, uint32_t room, uint32_t *total)
+/* The files beginning with `length` bytes at `bytes` — on the volume numbered
+ * on - 1 alone, or every volume for `on` 0 — into `ids` — room for `room` —
+ * *total how many there are. 0, or a negative -error_t. */
+static int files_starting_page(const void *bytes, size_t length, uint32_t on, file_id_t *ids, uint32_t room,
+                               uint32_t *total)
 {
     uint32_t out_cap = 8u + room * (uint32_t)sizeof(file_id_t);
     uint8_t *out     = malloc(out_cap);
     if (!out) return -ERR_NO_MEMORY;
-    uint32_t actual = 0, delivered = 0;
-    int rc = MfCall1(DECK_STORAGE, STORAGE_HEAD_QUERY, NULL, 0, bytes, (uint32_t)length,
-                     out, out_cap, &actual, BOX_ANSWER_GUARANTEED, NULL);
+    uint32_t actual = 0, delivered = 0, volume = on - 1u;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_HEAD_QUERY, on ? &volume : NULL, on ? sizeof(volume) : 0, bytes,
+                     (uint32_t)length, out, out_cap, &actual, BOX_ANSWER_GUARANTEED, NULL);
     if (rc == 0 && actual >= 8u) {
         memcpy(&delivered, out, sizeof(delivered));
         memcpy(total, out + 4, sizeof(*total));
@@ -961,18 +989,19 @@ static int files_starting_page(const void *bytes, size_t length, file_id_t *ids,
     return rc == 0 ? 0 : box_fail(rc);
 }
 
-int files_starting_with(const void *bytes, size_t length, file_id_t **out_ids)
+/* The files beginning with the bytes, in `on` (files_starting_page's). */
+static int files_starting(const void *bytes, size_t length, uint32_t on, file_id_t **out_ids)
 {
     if (!out_ids) return -ERR_INVALID_ARGUMENT;
     *out_ids = NULL;
     if (!bytes || length == 0 || length > FILE_HEAD_MOST) return -ERR_INVALID_ARGUMENT;
     uint32_t total = 0;
-    int rc = files_starting_page(bytes, length, NULL, 0, &total);
+    int rc = files_starting_page(bytes, length, on, NULL, 0, &total);
     while (rc == 0 && total > 0) {
         file_id_t *ids = malloc(total * sizeof(file_id_t));
         uint32_t   now = 0;
         if (!ids) return -ERR_NO_MEMORY;
-        rc = files_starting_page(bytes, length, ids, total, &now);
+        rc = files_starting_page(bytes, length, on, ids, total, &now);
         if (rc == 0 && now <= total) {
             *out_ids = ids;
             return (int)now;
@@ -981,6 +1010,16 @@ int files_starting_with(const void *bytes, size_t length, file_id_t **out_ids)
         total = now;
     }
     return rc;
+}
+
+int files_starting_with(const void *bytes, size_t length, file_id_t **out_ids)
+{
+    return files_starting(bytes, length, 0, out_ids);
+}
+
+int files_starting_with_on(uint32_t volume, const void *bytes, size_t length, file_id_t **out_ids)
+{
+    return files_starting(bytes, length, volume + 1u, out_ids);
 }
 
 /* =========================================================================

@@ -528,7 +528,7 @@
  * (ERR_INVALID_ARGUMENT otherwise); no params. out_crate = [u32 delivered]
  * [u32 total][u64 file_ids[delivered]] in file id order, as storage.query's;
  * a file kept deleted (obj.keep) is not met. */
-#define STORAGE_HEAD_QUERY          0x2A
+#define STORAGE_HEAD_QUERY          0x2A   /* params: none, or [u32 volume] — the question asked of that one */
 #define STORAGE_HEAD_MOST           16u
 
 /* volume.list — every volume of the house: the home volume, the one the
@@ -611,6 +611,11 @@
 #define STORAGE_SCOPE_USE           0
 #define STORAGE_SCOPE_EVERYWHERE    1
 #define STORAGE_SCOPE_DELETED       2
+/* With any scope of storage.query or storage.name.query: the question asked of
+ * one volume of the house alone — its number a [u32] right after the whose's
+ * bytes, before the tags set aside (ERR_OBJECT_NOT_FOUND for a number the
+ * house gave no volume). Without it a question walks every volume. */
+#define STORAGE_SCOPE_ONE_VOLUME    0x80u
 
 /* The whose byte every call that speaks tags carries, after the bytes its
  * params lay out before it (storage.query, storage.name.query, storage.tag.

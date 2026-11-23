@@ -258,6 +258,12 @@ int query_word_all(TagsOf whose, const char* word, file_id_t** out_ids);
  * count and a malloc'd list the caller frees (NULL for none), or a negative
  * -error_t — -ERR_INVALID_ARGUMENT for no bytes or more than FILE_HEAD_MOST. */
 int files_starting_with(const void* bytes, size_t length, file_id_t** out_ids);
+/* The same questions asked of the volume numbered `volume` (VolumeListed)
+ * alone — a search narrowed to one volume of the house; the ones above ask
+ * every volume. -ERR_OBJECT_NOT_FOUND for a number the house gave none. */
+int query_all_on(uint32_t volume, TagsOf whose, const char* tags, const char* without, file_id_t** out_ids);
+int query_word_all_on(uint32_t volume, TagsOf whose, const char* word, file_id_t** out_ids);
+int files_starting_with_on(uint32_t volume, const void* bytes, size_t length, file_id_t** out_ids);
 /* A file's card: its name, size and the tags `whose` of them it wears. */
 int file_info(TagsOf whose, file_id_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB

@@ -44,6 +44,15 @@ twovol_halt() {
     return $rc
 }
 
+# twovol_answer LOG LINE — what the machine answered the command LINE: the
+# lines after its echo up to the next prompt.
+twovol_answer() {
+    tr -d '\r' <"$1" | awk -v cmd="$2" '
+        found && /~ / { exit }
+        found { print }
+        index($0, "~ " cmd) && substr($0, length($0) - length(cmd) + 1) == cmd { found = 1 }'
+}
+
 # twovol_said LOG PATTERN WHAT — the log says PATTERN (grep -E).
 twovol_said() {
     grep -aqE "$2" "$1"
@@ -74,6 +83,7 @@ run_twovolumes() {
        type_line "carry twovol.note.txt 0 copy" && wait_for_prompt &&
        type_line "files kind:greeting" && wait_for_prompt &&
        type_line "files kind:note" && wait_for_prompt &&
+       type_line "files kind:note on 1" && wait_for_prompt &&
        mon_raw "device_del usbstick" &&
        wait_for_line build/serial.log 'volume 1: the medium the volume lives on has left' "$WAIT_QUIET_S" &&
        sleep 2 &&
@@ -96,6 +106,9 @@ run_twovolumes() {
     twovol_said "$L" '^Copied 1 file\(s\) to .*' "and copies the stick's file home"
     twovol_said "$L" '^On Holiday photos:' "files says where a file lies, the stick by its name"
     twovol_said "$L" '^On .* \(home\):' "and the home volume"
+    twovol_answer "$L" "files kind:note on 1" | grep -q "^On Holiday photos:" &&
+        ! twovol_answer "$L" "files kind:note on 1" | grep -q "(home)"
+    chk $? "twovolumes: a search narrowed to the stick finds its file alone"
     twovol_said "$L" 'volume 1: the medium the volume lives on has left — its book is held open' \
         "the stick pulled, its book is held open, the volume named"
     twovol_said "$L" 'volume 1: the volume is back, in seat [0-9]+: .* Its book is taken up' \

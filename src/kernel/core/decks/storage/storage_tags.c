@@ -427,17 +427,35 @@ int ObjGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
 
 /*
  * The scope byte of storage.query / storage.create (boxos_decks.h): inside the
- * Use Context unless the caller said everywhere.
+ * Use Context unless the caller said everywhere — and, for a question that
+ * takes it (`one_volume_too`), the bit that asks it of one volume taken off
+ * (storage_question_volume reads that volume).
  */
-static error_t storage_scope_of(const ManifestOp *op, size_t at, bool deleted_too, uint8_t *out_scope)
+static error_t storage_scope_of(const ManifestOp *op, size_t at, bool deleted_too, bool one_volume_too,
+                                uint8_t *out_scope)
 {
     if (op->param_size <= at) return ERR_INVALID_ARGUMENT;
-    uint8_t scope = op->params[at];
+    uint8_t scope = op->params[at] & (uint8_t)~(one_volume_too ? STORAGE_SCOPE_ONE_VOLUME : 0u);
     if (scope != STORAGE_SCOPE_USE && scope != STORAGE_SCOPE_EVERYWHERE &&
         !(deleted_too && scope == STORAGE_SCOPE_DELETED))
         return ERR_INVALID_ARGUMENT;
     *out_scope = scope;
     return OK;
+}
+
+/* The volume a question is asked of (STORAGE_SCOPE_ONE_VOLUME): its number at
+ * params[at], past the whose's bytes, *width grown by it; NULL — every
+ * volume of the house — when the scope at params[0] does not carry the bit. */
+static error_t storage_question_volume(const ManifestOp *op, size_t at, size_t *width, TagFSVolume **only)
+{
+    *only = NULL;
+    if (!(op->params[0] & STORAGE_SCOPE_ONE_VOLUME))
+        return OK;
+    if (op->param_size < at + 4u)
+        return ERR_INVALID_ARGUMENT;
+    *only   = TagFSVolumeNumbered(param_u32(op, at));
+    *width += 4u;
+    return *only ? OK : ERR_OBJECT_NOT_FOUND;
 }
 
 /* The scope a call is asked in: the Use Context is the person's lens, and a
@@ -665,14 +683,15 @@ static error_t StorageQueryPager(TagFSVolume *vol, const void *ask, uint64_t fro
  * answer, and the crate is given as many ids as it has room for, each the u64
  * the index holds.
  */
-static error_t storage_query_into(TagOwner owner, TagFSVolume *where, const TagSpelling *tags, uint32_t count,
-                                  const TagSpelling *without, uint32_t without_count, bool kept, const char *word,
-                                  size_t word_len, const Crate *out, const OpContext *ctx, uint32_t hdr[2])
+static error_t storage_query_into(TagOwner owner, TagFSVolume *where, TagFSVolume *only, const TagSpelling *tags,
+                                  uint32_t count, const TagSpelling *without, uint32_t without_count, bool kept,
+                                  const char *word, size_t word_len, const Crate *out, const OpContext *ctx,
+                                  uint32_t hdr[2])
 {
     const StorageQueryAsk ask   = { owner, where, tags, count, without, without_count, kept, word, word_len };
     uint64_t             *piece = kmalloc(STORAGE_QUERY_PIECE * sizeof(uint64_t));
     if (!piece) return ERR_NO_MEMORY;
-    error_t rc = StorageAnswerPages(StorageQueryPager, &ask, NULL, 1, out, ctx, piece, STORAGE_QUERY_PIECE, hdr);
+    error_t rc = StorageAnswerPages(StorageQueryPager, &ask, only, 1, out, ctx, piece, STORAGE_QUERY_PIECE, hdr);
     kfree(piece);
     return rc;
 }
@@ -709,9 +728,12 @@ int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, const Op
     bool         all    = false;
     size_t       width  = 0;
     TagFSVolume *where  = NULL;
-    error_t      src_rc = storage_scope_of(op, 0, true, &scope);
+    TagFSVolume *only   = NULL;
+    error_t      src_rc = storage_scope_of(op, 0, true, true, &scope);
     if (src_rc == OK)
         src_rc = StorageWhose(op, 1, ctx, false, &owner, &all, &width, &where);
+    if (src_rc == OK)
+        src_rc = storage_question_volume(op, 1 + width, &width, &only);
     if (src_rc != OK) return src_rc;
     if (!StorageHouseUp()) return ERR_NOT_INITIALIZED;
 
@@ -746,8 +768,8 @@ int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, const Op
     }
 
     uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
-    rc = storage_query_into(owner, where, tags, total, without, without_count, scope == STORAGE_SCOPE_DELETED, NULL, 0,
-                            out, ctx, hdr);
+    rc = storage_query_into(owner, where, only, tags, total, without, without_count, scope == STORAGE_SCOPE_DELETED,
+                            NULL, 0, out, ctx, hdr);
     kfree(tags);
     kfree(without);
     UseListDrop(use);
@@ -780,9 +802,12 @@ int ObjNameQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, cons
     bool         all   = false;
     size_t       width = 0;
     TagFSVolume *where = NULL;
-    error_t      rc    = storage_scope_of(op, 0, false, &scope);
+    TagFSVolume *only  = NULL;
+    error_t      rc    = storage_scope_of(op, 0, false, true, &scope);
     if (rc == OK)
         rc = StorageWhose(op, 1, ctx, false, &owner, &all, &width, &where);
+    if (rc == OK)
+        rc = storage_question_volume(op, 1 + width, &width, &only);
     if (rc != OK) return rc;
     if (!StorageHouseUp()) return ERR_NOT_INITIALIZED;
 
@@ -825,7 +850,8 @@ int ObjNameQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, cons
     }
 
     uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
-    rc = storage_query_into(owner, where, tags, total, without, without_count, false, text, word_len, out, ctx, hdr);
+    rc = storage_query_into(owner, where, only, tags, total, without, without_count, false, text, word_len, out, ctx,
+                            hdr);
     kfree(tags);
     kfree(without);
     UseListDrop(use);
@@ -882,7 +908,7 @@ int ObjTagList(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
     bool         all   = false;
     size_t       width = 0;
     TagFSVolume *where = NULL;
-    error_t      rc    = storage_scope_of(op, 8, false, &scope);
+    error_t      rc    = storage_scope_of(op, 8, false, false, &scope);
     if (rc == OK)
         rc = StorageWhose(op, 9, ctx, true, &owner, &all, &width, &where);
     if (rc == OK && !all)
@@ -1154,7 +1180,7 @@ int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count, const O
     size_t       width = 0;
     TagFSVolume *where = NULL;
     TagFSVolume *vol   = NULL;
-    error_t      rc    = storage_scope_of(op, 32, false, &scope);
+    error_t      rc    = storage_scope_of(op, 32, false, false, &scope);
     if (rc == OK)
         rc = StorageWhose(op, 33, ctx, false, &owner, &all, &width, &where);
     if (rc == OK)

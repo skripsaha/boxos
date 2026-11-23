@@ -394,7 +394,9 @@ static error_t HeadPager(TagFSVolume *vol, const void *ask, uint64_t from, uint6
     return TagFSStartingWithPage(vol, h->bytes, h->length, from, out, room, want_total, page);
 }
 
-/* STORAGE_HEAD_QUERY  in_crate: the bytes a file begins with, 1 to
+/* STORAGE_HEAD_QUERY  params: none, or [u32 volume] — the question asked of
+ *                     that one volume of the house alone;
+ *                     in_crate: the bytes a file begins with, 1 to
  *                     STORAGE_HEAD_MOST of them; out_crate: [u32 delivered]
  *                     [u32 total][u64 file_ids[delivered]], as storage.query's.
  *                     What a file is is told by its first bytes, and every
@@ -410,12 +412,14 @@ static int ObjHeadQuery(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (in->size == 0 || in->size > STORAGE_HEAD_MOST) return ERR_INVALID_ARGUMENT;
     if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
 
+    TagFSVolume *only = op->param_size >= 4 ? TagFSVolumeNumbered(param_u32(op, 0)) : NULL;
+    if (op->param_size >= 4 && !only) return ERR_OBJECT_NOT_FOUND;
     uint8_t *bytes = crate_in_buf(in, ctx);
     if (!bytes) return ERR_INVALID_ADDRESS;
     uint64_t      piece[STORAGE_HEAD_PIECE];
     uint32_t      hdr[2] = { 0, 0 };   /* delivered, total */
     const HeadAsk ask    = { bytes, (uint32_t)in->size };
-    error_t       rc     = StorageAnswerPages(HeadPager, &ask, NULL, 1, out, ctx, piece, STORAGE_HEAD_PIECE, hdr);
+    error_t       rc     = StorageAnswerPages(HeadPager, &ask, only, 1, out, ctx, piece, STORAGE_HEAD_PIECE, hdr);
     crate_buf_free(bytes);
     if (rc != OK) return rc;
     int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));
