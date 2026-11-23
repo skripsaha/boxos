@@ -209,6 +209,11 @@ static int disks_add(const DiskListed *d, const char *what)
 {
     uint8_t     kind = 0;
     const char *rest = what;
+    if (d->Table != DISK_TABLE_GPT || d->Copies) {
+        printf("No partition was laid on disk %u: %s\n", d->Seat,
+               disks_refusal(d->Table != DISK_TABLE_GPT ? -ERR_INVALID_STATE : -ERR_CORRUPTED));
+        return 1;
+    }
     if (strncmp(rest, "boxos", 5) == 0 && (rest[5] == '\0' || rest[5] == ' ')) {
         kind = DISK_PART_BOXOS;
         rest += 5;
@@ -279,6 +284,12 @@ static int disks_remove(const DiskListed *d, const char *what)
         if (d->Parts[i].Entry == entry) p = &d->Parts[i];
     if (!p || *what) {
         printf("Disk %u has no partition in entry %u\n", d->Seat, entry);
+        return 1;
+    }
+    int refused = d->Table != DISK_TABLE_GPT ? -ERR_INVALID_STATE : d->Copies ? -ERR_CORRUPTED
+                : p->Kind != DISK_PART_BOXOS ? -ERR_INVALID_ARGUMENT : p->Mounted ? -ERR_BUSY : 0;
+    if (refused) {
+        printf("Entry %u of disk %u stays: %s\n", entry, d->Seat, disks_refusal(refused));
         return 1;
     }
     char size[24];

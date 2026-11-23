@@ -139,6 +139,8 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_block.sh"
 # The twovolumes scenario: tools/logcheck_volumes.sh.
 . "$(dirname "$0")/logcheck_volumes.sh"
+# The disks scenario: tools/logcheck_disks.sh.
+. "$(dirname "$0")/logcheck_disks.sh"
 # The book's census and the stand's road on a book: tools/logcheck_book.sh,
 # its USB road tools/logcheck_book_usb.sh, the book the kernel writes read back
 # by both readers tools/logcheck_book_circle.sh; the kernel's Tallies of a book:
@@ -3928,101 +3930,6 @@ run_fullvolume() {
     lockrank_judge "$SCRATCH/serial.fullvolume.room.log $SCRATCH/serial.fullvolume.empty.log $SCRATCH/serial.fullvolume.fill.log $SCRATCH/serial.fullvolume.back.log" "fullvolume"
     rm -f "$SCRATCH/fullvolume.room.img" "$SCRATCH/fullvolume.empty.img" "$SCRATCH/fullvolume.fill.img"
     build   # leave the tree built plain, as every scenario here does
-}
-
-run_gpt() {
-    echo "== gpt: the table is kept at both ends, and the far one is read =="
-
-    # A GPT is written TWICE — the primary at LBA 1 and a copy in the last
-    # sector of the medium — and UEFI 2.10 §5.3.2 requires a reader whose
-    # primary does not check out to use the other one. This kernel did not: it
-    # returned nothing, and every caller read that as "there is no BoxOS ground
-    # on this disk". One dead erase block under sector 1 — the commonest way a
-    # GPT is lost — and a perfectly good disk did not mount, without a word.
-    #
-    # Reaching the far copy needs one fact no driver would hand out until now:
-    # how far the medium runs. BoardroomSeatSectors is that door.
-    #
-    # The disk under test arrives as a SECOND medium rather than as the one the
-    # machine booted from, deliberately: the loaders read a partition table
-    # too, and a scenario that damages the disk it is booting from measures
-    # them as much as the kernel. Here the machine boots the ordinary way and
-    # the damaged disk is handed to it afterwards, so what is measured is the
-    # Ground survey and nothing else.
-    build
-    ./tools/make_gpt_boot.py build/boxos.img "$SCRATCH/gpt-good.img" >/dev/null 2>&1
-    cp "$SCRATCH/gpt-good.img" "$SCRATCH/gpt-bad.img"
-    python3 - "$SCRATCH/gpt-bad.img" <<'EOF'
-import sys
-p = sys.argv[1]
-with open(p, 'r+b') as f:
-    f.seek(512)              # LBA 1: the primary GPT header
-    f.write(b'\x00' * 512)   # one dead erase block, which is how they go
-EOF
-    local GOOD_LOG="$SCRATCH/serial.gpt.good.log"
-    local BAD_LOG="$SCRATCH/serial.gpt.bad.log"
-
-    local which img wait_for log
-    for which in good bad; do
-        img="$SCRATCH/gpt-$which.img"
-        if [ "$which" = good ]; then
-            wait_for="from GPT entry"; log="$GOOD_LOG"
-        else
-            wait_for="the copy at the far end"; log="$BAD_LOG"
-        fi
-
-        make run-stop >/dev/null 2>&1
-        make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-        wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
-
-        local MARK
-        MARK=$(wc -l < build/serial.log)
-        mon_raw "drive_add 0 if=none,id=gptdisk,file=$img,format=raw"
-        sleep 1
-        mon_raw "device_add usb-storage,drive=gptdisk,id=gptstick"
-
-        # Waited on the survey having spoken, not on a clock.
-        wait_for_line build/serial.log "$wait_for" "$WAIT_QUIET_S" $((MARK + 1))
-        sleep 2
-        make run-stop >/dev/null 2>&1
-        tail -n +$((MARK + 1)) build/serial.log > "$log"
-    done
-
-    # ── the disk with both copies intact ────────────────────────────────────
-    grep -q "from GPT entry" "$GOOD_LOG"
-    chk $? "a healthy GPT disk gives up its BoxOS ground"
-
-    ! grep -qE "its GPT (is damaged|is not where)" "$GOOD_LOG"
-    chk $? "and nothing called a healthy table damaged"
-
-    ! grep -q "made for a smaller disk" "$GOOD_LOG"
-    chk $? "and the table matches the medium it is on"
-
-    # ── and the same disk with its primary header gone ──────────────────────
-    grep -q "its GPT is not where the disk says it is" "$BAD_LOG"
-    chk $? "a lost primary header is called damage, not an empty disk"
-
-    # The number is ASKED OF THE DISK, not typed. It used to be 122325 here —
-    # the last sector of the image as it was the day this was written — and the
-    # day the build began sizing the volume from its content, this check failed
-    # for a machine that had done exactly the right thing.
-    LAST=$(( $(stat -f%z "$SCRATCH/gpt-bad.img" 2>/dev/null || stat -c%s "$SCRATCH/gpt-bad.img") / 512 - 1 ))
-    grep -q "reading the copy at the far end, sector $LAST" "$BAD_LOG"
-    chk $? "and the far copy is looked for in the last sector of the medium"
-
-    grep -q "the copy at the far end is good" "$BAD_LOG"
-    chk $? "and it is read"
-
-    grep -q "from GPT entry" "$BAD_LOG"
-    chk $? "and the BoxOS ground on that disk is found after all"
-
-    # And the machine that was handed a damaged table finished the pass it was
-    # in rather than stopping inside it — the room says so on its way out.
-    grep -q "took a seat while the machine was" "$BAD_LOG"
-    chk $? "and the room finished seating it"
-
-    ! grep -qiE "panic|fault at" "$BAD_LOG"
-    chk $? "and nothing fell over reading a broken table"
 }
 
 run_twoctrl() {
@@ -10443,6 +10350,7 @@ case "${1:-both}" in
     mkfs)     run_mkfs ;;
     block4096) run_block4096 ;;
     twovolumes) run_twovolumes ;;
+    disks)      run_disks ;;
     uefi)     run_uefi ;;
     footing)  run_footing ;;
     stranger) run_stranger ;;
@@ -10463,7 +10371,6 @@ case "${1:-both}" in
     panicstop) run_panicstop ;;
     panicstopmut) run_panicstopmut ;;
     fullvolume) run_fullvolume ;;
-    gpt)      run_gpt ;;
     stillthere) run_stillthere ;;
     sleeps)     run_sleeps ;;
     lines)      run_lines ;;
@@ -10553,7 +10460,7 @@ case "${1:-both}" in
     defragdelete) run_defragdelete ;;
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwritebook; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_growbook; echo; run_growcutbook; echo; run_quill; echo; run_mountfail; echo; run_framerefuse; echo; run_bookboot; echo; run_loadersettings; echo; run_panel; echo; run_crossings; echo; run_scene; echo; run_drawcheck; echo; run_itemcheck; echo; run_benchmark; echo; run_census; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwritebook; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_disks; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_growbook; echo; run_growcutbook; echo; run_quill; echo; run_mountfail; echo; run_framerefuse; echo; run_bookboot; echo; run_loadersettings; echo; run_panel; echo; run_crossings; echo; run_scene; echo; run_drawcheck; echo; run_itemcheck; echo; run_benchmark; echo; run_census; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|stand|standusb|standmut|quill|quillmut|stackguard|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|framerefuse|bookboot|loadersettings|panel|crossings|scene|drawcheck|itemcheck|benchmark|topology|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
 esac
 
