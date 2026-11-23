@@ -261,6 +261,23 @@ typedef struct __attribute__((packed)) {
     uint32_t verdict;           /* BUILDPLATE_VERDICT_* */
 } VolumePacked;
 
+/* The shipment's number: FNV-1a 64 over every file packed, in pack order —
+ * its name and a NUL, its bytes, a NUL — so two files whose contents were
+ * swapped are another shipment. One rule for every packer of a volume: the
+ * host's (tools/create_tagfs_cargo.c) and the kernel's
+ * (tagfs/volume/volume_lay.c). */
+#define VOLUME_SHIPMENT_START  1469598103934665603ULL
+
+static inline uint64_t VolumeShipmentFold(uint64_t h, const void *p, uint64_t n)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    for (uint64_t i = 0; i < n; i++) {
+        h ^= b[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 /*
  * WHERE THE BOOK BEGINS — the stamp that says this volume carries a book, and
  * the two places a reader starts from. A Deed without it is no TagFS volume.

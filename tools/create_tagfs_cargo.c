@@ -91,30 +91,22 @@ void seed_reserved_tags(void) {
  * opinions. See VolumePacked in volume_deed.h.
  * ================================================================== */
 
-#define SHIPMENT_FNV_OFFSET 1469598103934665603ULL
-#define SHIPMENT_FNV_PRIME  1099511628211ULL
-
-static void shipment_fold(uint64_t* h, const void* p, size_t n) {
-    const unsigned char* b = (const unsigned char*)p;
-    for (size_t i = 0; i < n; i++) { *h ^= (uint64_t)b[i]; *h *= SHIPMENT_FNV_PRIME; }
-}
-
 /* Every file this volume is being given, in the order it is given them: the
  * name as written on the command line, then the bytes. The name is in the
  * number as well as the contents, because two files whose contents were
  * swapped are a different shipment. */
 static uint64_t shipment_fingerprint(int file_count, char* argv[], int first) {
-    uint64_t h = SHIPMENT_FNV_OFFSET;
+    uint64_t h = VOLUME_SHIPMENT_START;
     for (int i = 0; i < file_count; i++) {
         const char* path = argv[first + i * 2];
-        shipment_fold(&h, path, strlen(path) + 1);
+        h = VolumeShipmentFold(h, path, strlen(path) + 1);
         FILE* f = fopen(path, "rb");
         if (!f) continue;            /* the pack itself will refuse it below */
         static unsigned char buf[1 << 16];
         size_t got;
-        while ((got = fread(buf, 1, sizeof(buf), f)) > 0) shipment_fold(&h, buf, got);
+        while ((got = fread(buf, 1, sizeof(buf), f)) > 0) h = VolumeShipmentFold(h, buf, got);
         fclose(f);
-        shipment_fold(&h, "", 1);
+        h = VolumeShipmentFold(h, "", 1);
     }
     return h;
 }

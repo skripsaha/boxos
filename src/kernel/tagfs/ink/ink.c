@@ -455,6 +455,7 @@ error_t InkFields(TagFSVolume* vol, uint64_t fid, const char* name, uint32_t add
     return rc;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
 error_t InkRoleLaid(TagFSVolume* vol, uint64_t fid, uint32_t role, InkReceipt* out)
 {
     error_t rc;
@@ -463,6 +464,7 @@ error_t InkRoleLaid(TagFSVolume* vol, uint64_t fid, uint32_t role, InkReceipt* o
     } while (rc != OK && InkGoesRound(&rc));
     return rc;
 }
+#endif
 
 static error_t InkUndoneOnce(TagFSVolume* vol, uint64_t fid, InkReceipt* out)
 {

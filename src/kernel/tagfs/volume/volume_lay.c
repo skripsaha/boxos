@@ -1,36 +1,30 @@
 #include "volume_lay.h"
+#include "volume_lay_files.h"
 #include "tagfs_volume.h"
-#include "../ink/ink.h"
-#include "../file_map/file_map.h"
+#include "tagfs_handle.h"
 #include "../deed/deed.h"
-#include "../mount/ground_grow.h"
 #include "disk_table.h"
 #include "boardroom.h"
-#include "book_bind.h"
+#include "buildplate.h"
 #include "random.h"
 #include "rtc.h"
-#include "atomics.h"
+#include "klib.h"
 
-/* The first Tally's seq, and slot 0's — as every maker lays them (§16.2 п.23). */
-#define LAY_TALLY_SEQ  1u
-#define LAY_SLOT_SEQ   2u
-/* Blanked a run at a time, the front of the ground before the book. */
-#define LAY_BLANK_BLOCKS  16u
-/* The files the system keeps, looked up a page of the home volume's at a time. */
-#define LAY_LIST_PAGE  64u
-
-static const char* const s_reserved[] = {
-#define X(id, key) key,
-    TAGFS_RESERVED_KEYS(X)
-#undef X
-};
+/* A piece: what a turn reads off the home volume, writes, or blanks. */
+#define LAY_PIECE_BLOCKS  16u
+#define LAY_PIECE         (LAY_PIECE_BLOCKS * VOLUME_BLOCK_BYTES)
+/* The kernel's last bytes a piece keeps in front of the next, so a plate
+ * that straddles two is seen whole. */
+#define LAY_PLATE_KEPT    (sizeof(BuildPlate) - 1u)
 
 static VolumeLaying* volatile s_laying;
 static volatile uint32_t      s_busy;
 static volatile uint32_t      s_serving;
 
+static void VolumeLayEnd(VolumeLaying* l, error_t rc);
+
 // ----------------------------------------------------------------------------
-// The ground
+// The disk
 // ----------------------------------------------------------------------------
 
 static bool VolumeLayStillThere(const VolumeLaying* l)
@@ -54,8 +48,8 @@ static error_t VolumeLayRefusal(const VolumeLaying* l, const char* what)
     return ERR_WRITE_FAILED;
 }
 
-/* The binder's blocks and the laying's own onto the ground: the volume's
- * block `block`, the seat asked first. */
+/* `bytes` onto the ground at the volume's block `block`, the seat asked
+ * first: the binder's sink and the laying's own. */
 static int VolumeLaySink(void* ctx, uint64_t block, const void* data, uint64_t bytes)
 {
     const VolumeLaying* l = ctx;
@@ -65,6 +59,11 @@ static int VolumeLaySink(void* ctx, uint64_t block, const void* data, uint64_t b
                           (uint32_t)(bytes / BOARDROOM_SECTOR_BYTES), data, NULL) == 0 ? 0 : -1;
 }
 
+static error_t VolumeLayWritten(VolumeLaying* l, uint64_t block, const void* data, uint64_t bytes, const char* what)
+{
+    return VolumeLaySink(l, block, data, bytes) == 0 ? OK : VolumeLayRefusal(l, what);
+}
+
 static error_t VolumeLayFlush(const VolumeLaying* l, const char* what)
 {
     if (!VolumeLayStillThere(l) || BoardroomFlush(l->seat) != 0)
@@ -72,8 +71,8 @@ static error_t VolumeLayFlush(const VolumeLaying* l, const char* what)
     return OK;
 }
 
-/* The partition asked for, held to what a laying may stand on: *base and
- * *sectors its ground in the room's sectors. */
+/* The partition asked for, held to what a laying may stand on: its ground in
+ * the room's sectors into l->ground. */
 static error_t VolumeLayGround(VolumeLaying* l)
 {
     DiskTable t;
@@ -116,137 +115,318 @@ static error_t VolumeLayGround(VolumeLaying* l)
 }
 
 // ----------------------------------------------------------------------------
-// The book and the Deed
+// The turns
 // ----------------------------------------------------------------------------
 
-/* The leaves of a volume that holds no file yet: the reserved words at their
- * ids, as every maker lays them, and the name a person gave it (§1.4). */
-static error_t VolumeLayLeaves(const VolumeLaying* l, BindLeaves* leaves)
+/* The next turn, at the home volume's next service point. */
+static void VolumeLayNext(VolumeLaying* l, VolumeLayStep step)
 {
-    for (uint32_t id = 0; id < TAGFS_RESERVED_COUNT; id++) {
-        TallyTag t    = { .flags = 0, .key = (const uint8_t*)s_reserved[id], .key_len = strlen(s_reserved[id]),
-                          .value = NULL, .value_len = 0 };
-        uint8_t* body = BindBody(leaves, 30u + t.key_len);
-        if (!body || BindAdd(leaves, TALLY_TAGS, (TallyKey){ id, 0 }, body, TallyTagPut(body, &t), 1) != 0)
-            return ERR_NO_MEMORY;
-    }
-    if (l->name_len) {
-        uint8_t* body = BindBody(leaves, 10u + l->name_len);
-        if (!body || BindAdd(leaves, TALLY_USE, (TallyKey){ 1, 0 }, body,
-                             TallyUsePut(body, l->name, l->name_len), 1) != 0)
-            return ERR_NO_MEMORY;
-    }
-    return OK;
+    l->step = step;
+    HelmReady(TagFSHome(), &l->turn);
 }
 
-/* One copy of the Deed — GEOMETRY · FRAME · BORN · BOOT, as every maker
- * stamps one, the BOOT empty until the kernel is laid — into `block`. */
-static void VolumeLayDeed(const VolumeLaying* l, uint8_t* block, const VolumeFrame* frame, uint64_t blocks,
-                          uint32_t role)
+/* `want` bytes of the file the pass is on, from l->offset, into `into`. */
+static error_t VolumeLayPieceRead(VolumeLaying* l, VolumeLaidFile* f, uint8_t* into, uint64_t want)
 {
-    VolumeGeometry geo  = VolumeGeometryLaid();
-    VolumeBorn     born;
-    VolumeBoot     boot;
-    DeedPen        pen;
+    TagFSVolume* home = TagFSHome();
+    uint64_t     got  = 0;
+    if (!tagfs_enter(home))
+        return ERR_DEVICE_NOT_READY;
+    f->src->offset = l->offset;
+    error_t rc     = tagfs_read(home, f->src, into, want, &got);
+    tagfs_leave(home);
+    if (rc == OK && got != want)
+        rc = ERR_METADATA_CORRUPTED;    /* the handle's view holds the file it opened: its size is there */
+    if (rc != OK)
+        kprintf("[TagFS] '%s' could not be read off the home volume to be laid (error %u)\n", f->name,
+                (unsigned)rc);
+    return rc;
+}
+
+/* The kernel's bytes the last read added to those kept in front of them,
+ * looked at for its plate: every place one could begin that is first seen
+ * whole now, the last bytes kept for the next piece. The tag is the running
+ * kernel's own, so the kernel's image carries no second copy of it. */
+static void VolumeLayPlateSought(VolumeLaying* l, uint64_t got)
+{
+    const BuildPlate* own = BuildPlateRead();
+    uint64_t          len = l->kept + got;
+    for (uint64_t i = 0; i + sizeof(BuildPlate) <= len; i++) {
+        if (memcmp(l->piece + i, own->Tag, BUILDPLATE_TAG_BYTES) != 0 || l->plates++)
+            continue;
+        BuildPlate p;
+        memcpy(&p, l->piece + i, sizeof(p));
+        if (p.Magic == BUILDPLATE_MAGIC) {
+            l->packed.tree    = p.TreeFingerprint;
+            l->packed.verdict = p.Verdict;
+        }
+    }
+    uint32_t keep = len < LAY_PLATE_KEPT ? (uint32_t)len : (uint32_t)LAY_PLATE_KEPT;
+    memmove(l->piece, l->piece + len - keep, keep);
+    l->kept = keep;
+}
+
+/* The file the pass is on done with: the next one. False when it was the last. */
+static bool VolumeLayFileDone(VolumeLaying* l)
+{
+    l->offset = 0;
+    l->kept   = 0;
+    return ++l->at < l->count;
+}
+
+/* A piece of a file read, folded into the shipment, looked at for the
+ * kernel's plate, and the digest of each block taken — the last block's tail
+ * zeros, as written. Past the last file the book is laid out with them. */
+static void VolumeLayDigestTurn(VolumeLaying* l)
+{
+    VolumeLaidFile* f    = &l->files[l->at];
+    uint64_t        want = f->size - l->offset < LAY_PIECE ? f->size - l->offset : LAY_PIECE;
+    uint8_t*        into = l->piece + l->kept;
+    if (l->offset == 0)
+        l->packed.shipment = VolumeShipmentFold(l->packed.shipment, f->name, f->name_len + 1u);
+    error_t rc = want ? VolumeLayPieceRead(l, f, into, want) : OK;
+    if (rc != OK) {
+        VolumeLayEnd(l, rc);
+        return;
+    }
+    uint64_t blocks = (want + VOLUME_BLOCK_BYTES - 1u) / VOLUME_BLOCK_BYTES;
+    uint64_t first  = f->start - l->frame.data_block + l->offset / VOLUME_BLOCK_BYTES;
+    l->packed.shipment = VolumeShipmentFold(l->packed.shipment, into, want);
+    memset(into + want, 0, blocks * VOLUME_BLOCK_BYTES - want);
+    for (uint64_t b = 0; b < blocks; b++)
+        l->digests[first + b] = BoxHashIntegrity(into + b * VOLUME_BLOCK_BYTES, VOLUME_BLOCK_BYTES, &l->hash);
+    if (l->at == 0)
+        VolumeLayPlateSought(l, want);
+    l->offset += want;
+    if (l->offset < f->size) {
+        VolumeLayNext(l, VOLUME_LAY_DIGEST);
+        return;
+    }
+    l->packed.shipment = VolumeShipmentFold(l->packed.shipment, "", 1);
+    if (VolumeLayFileDone(l)) {
+        VolumeLayNext(l, VOLUME_LAY_DIGEST);
+        return;
+    }
+    if (l->plates != 1) {
+        kprintf("[TagFS] the kernel laid carries %u plate(s) — the volume will say it knows nothing about which "
+                "tree made it\n", l->plates);
+        l->packed.tree    = 0;
+        l->packed.verdict = BUILDPLATE_VERDICT_UNSTAMPED;
+    }
+    rc = VolumeLayBookPlanned(l);
+    if (rc != OK) {
+        VolumeLayEnd(l, rc);
+        return;
+    }
+    l->at     = 0;
+    l->offset = 0;
+    VolumeLayNext(l, VOLUME_LAY_BLANK);
+}
+
+/* The Deed's blocks at both ends blanked and on the medium before anything
+ * else is written — a partition that held a volume keeps its Deed until then,
+ * and a Deed left standing through the writes below would name what they
+ * overwrote. Then the front — the Deed's grain past it and the Spine's — a
+ * run a turn. */
+static void VolumeLayBlankTurn(VolumeLaying* l)
+{
+    error_t rc = OK;
+    memset(l->piece, 0, LAY_PIECE);
+    if (l->front == 0) {
+        rc = VolumeLayWritten(l, 0, l->piece, VOLUME_BLOCK_BYTES, "the blanking of the Deed's blocks");
+        if (rc == OK)
+            rc = VolumeLayWritten(l, l->blocks - 1u, l->piece, VOLUME_BLOCK_BYTES,
+                                  "the blanking of the Deed's blocks");
+        if (rc == OK)
+            rc = VolumeLayFlush(l, "the Deed's blocks blanked");
+        l->front = 1;
+    } else {
+        uint64_t left = l->frame.data_block - l->front;
+        uint64_t n    = left < LAY_PIECE_BLOCKS ? left : LAY_PIECE_BLOCKS;
+        rc = VolumeLayWritten(l, l->front, l->piece, n * VOLUME_BLOCK_BYTES, "the front of the ground");
+        l->front += n;
+    }
+    if (rc != OK)
+        VolumeLayEnd(l, rc);
+    else
+        VolumeLayNext(l, l->front < l->frame.data_block ? VOLUME_LAY_BLANK : VOLUME_LAY_DATA);
+}
+
+/* A piece of a file read again, each block held to the digest the book will
+ * carry for it — a file whose bytes are not the ones their digests were taken
+ * of is refused — and written to its place. */
+static void VolumeLayDataTurn(VolumeLaying* l)
+{
+    VolumeLaidFile* f    = &l->files[l->at];
+    uint64_t        want = f->size - l->offset < LAY_PIECE ? f->size - l->offset : LAY_PIECE;
+    error_t         rc   = want ? VolumeLayPieceRead(l, f, l->piece, want) : OK;
+    uint64_t        blocks = (want + VOLUME_BLOCK_BYTES - 1u) / VOLUME_BLOCK_BYTES;
+    uint64_t        first  = f->start - l->frame.data_block + l->offset / VOLUME_BLOCK_BYTES;
+    if (rc == OK)
+        memset(l->piece + want, 0, blocks * VOLUME_BLOCK_BYTES - want);
+    for (uint64_t b = 0; rc == OK && b < blocks; b++)
+        if (BoxHashIntegrity(l->piece + b * VOLUME_BLOCK_BYTES, VOLUME_BLOCK_BYTES, &l->hash) !=
+            l->digests[first + b]) {
+            kprintf("[TagFS] '%s' changed while it was laid: its block %llu is not the block its digest was taken "
+                    "of\n", f->name, (unsigned long long)(l->offset / VOLUME_BLOCK_BYTES + b));
+            rc = ERR_CHECKSUM;
+        }
+    if (rc == OK && blocks)
+        rc = VolumeLayWritten(l, f->start + l->offset / VOLUME_BLOCK_BYTES, l->piece, blocks * VOLUME_BLOCK_BYTES,
+                              "the system's files");
+    if (rc != OK) {
+        VolumeLayEnd(l, rc);
+        return;
+    }
+    l->offset += want;
+    if (l->offset < f->size || VolumeLayFileDone(l))
+        VolumeLayNext(l, VOLUME_LAY_DATA);
+    else
+        VolumeLayNext(l, VOLUME_LAY_BOOK);
+}
+
+/* One copy of the Deed — GEOMETRY · FRAME · BORN · BOOT · PACKED, as every
+ * maker stamps one — into `block`. */
+static void VolumeLayDeed(const VolumeLaying* l, uint8_t* block, uint32_t role)
+{
+    const VolumeLaidFile* k   = &l->files[0];
+    VolumeGeometry        geo = VolumeGeometryLaid();
+    VolumeBorn            born;
+    VolumeBoot            boot;
+    DeedPen               pen;
     memset(&born, 0, sizeof(born));
     memset(&boot, 0, sizeof(boot));
-    born.created_unix = l->made_at;
+    born.created_unix  = l->made_at;
     memcpy(born.maker, "boxos kernel", 12);
+    boot.kernel_block  = (uint32_t)k->start;
+    boot.kernel_blocks = (uint32_t)k->blocks;
+    boot.kernel_bytes  = (uint32_t)k->size;
     DeedPenOpen(&pen, block, DEED_PEN_BYTES);
     (void)DeedPenSay(&pen, VOLUME_STAMP_GEOMETRY, &geo, sizeof(geo));
-    (void)DeedPenSay(&pen, VOLUME_STAMP_FRAME, frame, sizeof(*frame));
+    (void)DeedPenSay(&pen, VOLUME_STAMP_FRAME, &l->frame, sizeof(l->frame));
     (void)DeedPenSay(&pen, VOLUME_STAMP_BORN, &born, sizeof(born));
     (void)DeedPenSay(&pen, VOLUME_STAMP_BOOT, &boot, sizeof(boot));
+    (void)DeedPenSay(&pen, VOLUME_STAMP_PACKED, &l->packed, sizeof(l->packed));
     DeedPenSetUuid(&pen, l->uuid);
-    DeedPenSetGround(&pen, blocks * VOLUME_BLOCK_SECTORS, (blocks - 1u) * VOLUME_BLOCK_SECTORS);
+    DeedPenSetGround(&pen, l->blocks * VOLUME_BLOCK_SECTORS, (l->blocks - 1u) * VOLUME_BLOCK_SECTORS);
     DeedPenSetRole(&pen, role);
     DeedPenSeal(&pen);
 }
 
-/* The book and the Deed on the ground, in a maker's order (volume_lay.h). */
-static error_t VolumeLayWrite(VolumeLaying* l, const VolumeFrame* frame, uint64_t blocks, const BindPlan* plan)
+/* The book — the Tally's nodes in both copies, then slot 0 naming them — on
+ * the medium with the files, and only then the Deed at both ends, on the
+ * medium in its turn. Laid, the house is asked to take it in. */
+static void VolumeLayBookTurn(VolumeLaying* l)
 {
-    const BindSink sink   = { VolumeLaySink, l };
-    uint64_t       failed = 0;
-    uint8_t*       blank  = kmalloc(LAY_BLANK_BLOCKS * VOLUME_BLOCK_BYTES);
-    uint8_t*       deed   = kmalloc(DEED_PEN_BYTES);
-    error_t        rc     = blank && deed ? OK : ERR_NO_MEMORY;
-    if (rc == OK) {
-        memset(blank, 0, LAY_BLANK_BLOCKS * VOLUME_BLOCK_BYTES);
-        if (VolumeLaySink(l, 0, blank, VOLUME_BLOCK_BYTES) != 0 ||
-            VolumeLaySink(l, blocks - 1u, blank, VOLUME_BLOCK_BYTES) != 0)
-            rc = VolumeLayRefusal(l, "the blanking of a Deed's blocks");
-    }
+    const BindSink    sink   = { VolumeLaySink, l };
+    const SpineHead   head   = { LAY_TALLY_SEQ, 0, 0, l->made_at * 1000000000ull };
+    const SpineCounts counts = VolumeLayCounts(l);
+    uint64_t          failed = 0;
+    int               bound  = BindTally(&sink, &l->plan, l->uuid, LAY_TALLY_SEQ, &failed);
+    if (bound == BIND_OK)
+        bound = BindSpine(&sink, &l->plan, l->frame.spine_block, l->leaves.grain, l->uuid, &head, &counts,
+                          LAY_SLOT_SEQ, &failed);
+    error_t rc = bound == BIND_OK ? OK : bound == BIND_NO_MEMORY ? ERR_NO_MEMORY : VolumeLayRefusal(l, "the book");
     if (rc == OK)
-        rc = VolumeLayFlush(l, "the Deed's blocks blanked");
-    for (uint64_t b = 1; rc == OK && b < frame->data_block; b += LAY_BLANK_BLOCKS) {
-        uint64_t n = frame->data_block - b < LAY_BLANK_BLOCKS ? frame->data_block - b : LAY_BLANK_BLOCKS;
-        if (VolumeLaySink(l, b, blank, n * VOLUME_BLOCK_BYTES) != 0)
-            rc = VolumeLayRefusal(l, "the front of the ground");
+        rc = VolumeLayFlush(l, "the files and the book before their Deed");
+    if (rc == OK) {
+        memset(l->piece, 0, DEED_PEN_BYTES);
+        VolumeLayDeed(l, l->piece, VOLUME_DEED_ROLE_HEAD);
+        rc = VolumeLayWritten(l, 0, l->piece, DEED_PEN_BYTES, "the Deed");
     }
     if (rc == OK) {
-        const SpineHead   head   = { LAY_TALLY_SEQ, 0, 0, l->made_at * 1000000000ull };
-        const SpineCounts counts = { 1u, TAGFS_RESERVED_COUNT, 1u };
-        int               bound  = BindTally(&sink, plan, l->uuid, LAY_TALLY_SEQ, &failed);
-        if (bound == BIND_OK)
-            bound = BindSpine(&sink, plan, frame->spine_block, frame->spine_stride, l->uuid, &head, &counts,
-                              LAY_SLOT_SEQ, &failed);
-        rc = bound == BIND_OK ? OK : bound == BIND_NO_MEMORY ? ERR_NO_MEMORY : VolumeLayRefusal(l, "the book");
-    }
-    if (rc == OK)
-        rc = VolumeLayFlush(l, "the book before its Deed");
-    if (rc == OK) {
-        VolumeLayDeed(l, deed, frame, blocks, VOLUME_DEED_ROLE_HEAD);
-        if (VolumeLaySink(l, 0, deed, DEED_PEN_BYTES) != 0)
-            rc = VolumeLayRefusal(l, "the Deed");
-    }
-    if (rc == OK) {
-        VolumeLayDeed(l, deed, frame, blocks, VOLUME_DEED_ROLE_TAIL);
-        if (VolumeLaySink(l, blocks - 1u, deed, DEED_PEN_BYTES) != 0)
-            rc = VolumeLayRefusal(l, "the Deed's far copy");
+        memset(l->piece, 0, DEED_PEN_BYTES);
+        VolumeLayDeed(l, l->piece, VOLUME_DEED_ROLE_TAIL);
+        rc = VolumeLayWritten(l, l->blocks - 1u, l->piece, DEED_PEN_BYTES, "the Deed's far copy");
     }
     if (rc == OK)
         rc = VolumeLayFlush(l, "the Deed");
-    kfree(blank);
-    kfree(deed);
-    return rc;
+    if (rc != OK) {
+        VolumeLayEnd(l, rc);
+        return;
+    }
+    char text[33];
+    DeedUuidText(l->uuid, text);
+    kprintf("[TagFS] seat %u: a volume is laid on entry %u — %s, %llu block(s), %u file(s) the system keeps on it, "
+            "the kernel in one run from block %llu named in its Deed; the house is to take it in\n", l->seat,
+            l->entry, text, (unsigned long long)l->blocks, l->count, (unsigned long long)l->files[0].start);
+    l->roles = l->count;
+    VolumeLayFilesLetGo(l, TagFSHome());
+    BindPlanFree(&l->plan);
+    BindLeavesFree(&l->leaves);
+    kfree(l->piece);
+    l->piece = NULL;
+    l->step  = VOLUME_LAY_TAKEN;
+    __atomic_store_n(&s_laying, l, __ATOMIC_RELEASE);
+    TagFSHouseLook();
 }
 
-/* A new identity, the book laid out for it in memory — refused before a byte
- * is written when the ground cannot hold it — and written. */
-static error_t VolumeLayBook(VolumeLaying* l)
+static void VolumeLayTurn(HelmWaiter* w)
 {
-    const uint32_t grain  = VolumeGeometryLaid().grain_bytes / VOLUME_BLOCK_BYTES;
-    VolumeFrame    frame  = VolumeFrameLaid(grain);
-    uint64_t       blocks = l->ground.sectors / VOLUME_BLOCK_SECTORS;
-    BindLeaves     leaves;
-    BindPlan       plan;
-    memset(&leaves, 0, sizeof(leaves));
-    memset(&plan, 0, sizeof(plan));
-    leaves.grain = grain;
-    leaves.grid  = 1;
-    leaves.seq   = LAY_TALLY_SEQ;
-    RandomGuid(l->uuid);
-    l->made_at = rtc_get_unix64();
+    VolumeLaying* l = container_of(w, VolumeLaying, turn);
+    switch (l->step) {
+    case VOLUME_LAY_DIGEST: VolumeLayDigestTurn(l); break;
+    case VOLUME_LAY_BLANK:  VolumeLayBlankTurn(l); break;
+    case VOLUME_LAY_DATA:   VolumeLayDataTurn(l); break;
+    case VOLUME_LAY_BOOK:   VolumeLayBookTurn(l); break;
+    case VOLUME_LAY_TAKEN:  break;      /* the house's to move on (VolumeLayServe) */
+    }
+}
 
-    error_t rc = blocks > frame.data_block + 1u ? VolumeLayLeaves(l, &leaves) : ERR_TAGFS_NO_SPACE;
-    if (rc == OK) {
-        int laid = QuireLay(&leaves, frame.data_block, blocks - 1u, &plan);
-        rc = laid == BIND_OK ? OK : laid == BIND_NO_ROOM ? ERR_TAGFS_NO_SPACE : ERR_NO_MEMORY;
+// ----------------------------------------------------------------------------
+// The beginning, and the end
+// ----------------------------------------------------------------------------
+
+/* The laying over: what it holds let go, the answer given and the next one
+ * let in. */
+static void VolumeLayEnd(VolumeLaying* l, error_t rc)
+{
+    if (l->rc == OK)
+        l->rc = rc;
+    VolumeLayFilesLetGo(l, TagFSHome());
+    BindPlanFree(&l->plan);
+    BindLeavesFree(&l->leaves);
+    kfree(l->piece);
+    l->piece = NULL;
+    if (l->rc == OK)
+        kprintf("[TagFS] volume %u is laid: %u file(s) the system keeps, the kernel named in its Deed\n", l->number,
+                l->roles);
+    else
+        kprintf("[TagFS] no volume was laid on seat %u (error %u)\n", l->seat, (unsigned)l->rc);
+    __atomic_store_n(&s_laying, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_busy, 0u, __ATOMIC_RELEASE);
+    l->ended(l);
+}
+
+/* The files the system keeps opened and placed, and the book laid out to see
+ * it fits: nothing written yet. */
+static error_t VolumeLayPlanned(VolumeLaying* l)
+{
+    TagFSVolume* home  = TagFSHome();
+    uint32_t     grain = VolumeGeometryLaid().grain_bytes / VOLUME_BLOCK_BYTES;
+    l->frame           = VolumeFrameLaid(grain);
+    l->blocks          = l->ground.sectors / VOLUME_BLOCK_SECTORS;
+    l->made_at         = rtc_get_unix64();
+    l->packed          = (VolumePacked){ .packed_unix = l->made_at, .shipment = VOLUME_SHIPMENT_START,
+                                         .verdict = BUILDPLATE_VERDICT_UNSTAMPED };
+    RandomGuid(l->uuid);
+    BoxHashInit(&l->hash, l->uuid, sizeof(l->uuid));
+    if (l->blocks <= l->frame.data_block + 1u) {
+        kprintf("[TagFS] seat %u: entry %u is %llu block(s) — too small for a volume\n", l->seat, l->entry,
+                (unsigned long long)l->blocks);
+        return ERR_TAGFS_NO_SPACE;
     }
-    if (rc == ERR_TAGFS_NO_SPACE)
-        kprintf("[TagFS] seat %u: entry %u is %llu block(s) — too small for a volume's book\n", l->seat, l->entry,
-                (unsigned long long)blocks);
+    if (!tagfs_enter(home))
+        return ERR_DEVICE_NOT_READY;
+    error_t rc = VolumeLayFilesTaken(l, home);
+    tagfs_leave(home);
     if (rc == OK)
-        rc = VolumeLayWrite(l, &frame, blocks, &plan);
+        rc = VolumeLayBookPlanned(l);   /* the digests not taken yet: what the book takes, they do not change */
     if (rc == OK) {
-        char text[33];
-        DeedUuidText(l->uuid, text);
-        kprintf("[TagFS] seat %u: a volume is laid on entry %u — %s, %llu block(s), its book bound and its Deed at "
-                "both ends; the house is to take it in\n", l->seat, l->entry, text, (unsigned long long)blocks);
+        l->packed.file_count = l->count;
+        l->piece             = kmalloc(LAY_PLATE_KEPT + LAY_PIECE);
+        rc                   = l->piece ? OK : ERR_NO_MEMORY;
     }
-    BindPlanFree(&plan);
-    BindLeavesFree(&leaves);
     return rc;
 }
 
@@ -254,245 +434,67 @@ error_t VolumeLayBegin(VolumeLaying* l)
 {
     if (__atomic_exchange_n(&s_busy, 1u, __ATOMIC_ACQ_REL))
         return ERR_WOULD_BLOCK;
-    l->rc     = OK;
-    l->number = 0;
-    l->roles  = 0;
-    l->vol    = NULL;
-    l->items  = NULL;
+    l->rc        = OK;
+    l->number    = 0;
+    l->roles     = 0;
+    l->files     = NULL;
+    l->count     = 0;
+    l->tags      = NULL;
+    l->tag_count = 0;
+    l->tag_room  = 0;
+    l->digests   = NULL;
+    l->piece     = NULL;
+    l->kept      = 0;
+    l->plates    = 0;
+    l->at        = 0;
+    l->offset    = 0;
+    l->front     = 0;
+    l->turn      = (HelmWaiter){ .run = VolumeLayTurn };
+    memset(&l->leaves, 0, sizeof(l->leaves));
+    memset(&l->plan, 0, sizeof(l->plan));
     error_t rc = VolumeLayGround(l);
     if (rc == OK)
-        rc = VolumeLayBook(l);
+        rc = VolumeLayPlanned(l);
     if (rc != OK) {
+        VolumeLayFilesLetGo(l, TagFSHome());
+        BindPlanFree(&l->plan);
+        BindLeavesFree(&l->leaves);
+        kfree(l->piece);
+        l->piece = NULL;
         __atomic_store_n(&s_busy, 0u, __ATOMIC_RELEASE);
         return rc;
     }
-    l->step = VOLUME_LAY_TAKEN;
-    __atomic_store_n(&s_laying, l, __ATOMIC_RELEASE);
-    TagFSHouseLook();
+    kprintf("[TagFS] seat %u: a volume is to be laid on entry %u — %u file(s) the system keeps, %llu block(s) of "
+            "them\n", l->seat, l->entry, l->count, (unsigned long long)(l->end - l->frame.data_block));
+    VolumeLayNext(l, VOLUME_LAY_DIGEST);
     return OK;
 }
 
-// ----------------------------------------------------------------------------
-// After the book: taken in, the system given, the kernel named, settled
-// ----------------------------------------------------------------------------
-
-/* The laying over: the answer given and the next one let in. */
-static void VolumeLayEnd(VolumeLaying* l, error_t rc)
-{
-    if (l->rc == OK)
-        l->rc = rc;
-    kfree(l->items);
-    l->items = NULL;
-    if (l->rc == OK)
-        kprintf("[TagFS] volume %u is laid: %u file(s) the system keeps, the kernel named in its Deed, all of it "
-                "settled\n", l->number, l->roles);
-    else
-        kprintf("[TagFS] the volume laid on seat %u was not given the system (error %u) — it holds what was laid "
-                "before\n", l->seat, (unsigned)l->rc);
-    __atomic_store_n(&s_laying, NULL, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_busy, 0u, __ATOMIC_RELEASE);
-    l->ended(l);
-}
-
-/* The files the home volume keeps in a role, the kernel's first: into
- * l->items, how many in *count. ERR_FILE_NOT_FOUND for a home volume that
- * keeps no kernel. Inside the home volume's door. */
-static error_t VolumeLayRoleFiles(VolumeLaying* l, TagFSVolume* home, uint32_t* count)
-{
-    uint64_t  ids[LAY_LIST_PAGE];
-    uint32_t  room = 0, n = 0, kernels = 0;
-    TagFSPage page;
-    *count = 0;
-    for (uint32_t pass = 0; pass < 2u; pass++) {
-        uint64_t from = 1;
-        do {
-            if (TagFSListPage(home, from, ids, LAY_LIST_PAGE, false, &page) != OK)
-                return ERR_DEVICE_NOT_READY;
-            for (uint32_t i = 0; i < page.delivered; i++) {
-                FileRecord* rec  = FileMapRecordHold(home->state.files, ids[i], NULL);
-                uint32_t    role = rec ? rec->flags & TAGFS_FILE_ROLE_MASK : 0u;
-                FileRecordRelease(rec);
-                if (!role || (pass == 0) != (role == TAGFS_FILE_ROLE_KERNEL))
-                    continue;
-                if (n == room) {
-                    room = room ? room * 2u : 32u;
-                    CarryItem* grown = krealloc(l->items, room * sizeof(CarryItem));
-                    if (!grown)
-                        return ERR_NO_MEMORY;
-                    l->items = grown;
-                }
-                l->items[n++] = (CarryItem){ .from = home, .fid = ids[i], .arrived = 0 };
-                kernels += pass == 0;
-            }
-            from = page.next;
-        } while (from);
-    }
-    *count = n;
-    return kernels ? OK : ERR_FILE_NOT_FOUND;
-}
-
-static void VolumeLayCarried(Carry* c)
-{
-    VolumeLaying* l = container_of(c, VolumeLaying, carry);
-    l->roles        = c->done;
-    l->rc           = c->rc;
-    __atomic_store_n(&l->step, VOLUME_LAY_BOOT, __ATOMIC_RELEASE);
-}
-
-/* The house took the volume in and mounted it: the maker's carry begins. A
- * volume the house will not mount is said, and the laying ends. */
+/* The house took the volume in and mounted it: the answer. A volume the
+ * house will not mount is said. */
 static void VolumeLayTaken(VolumeLaying* l)
 {
     TagFSVolume* vol = TagFSVolumeOfUuid(l->uuid);
-    if (!vol || !TagFSVolumeMounted(vol)) {
-        bool coming = vol ? __atomic_load_n(&vol->mount.arrival_owed, __ATOMIC_ACQUIRE) ||
-                            __atomic_load_n(&vol->mount.mount_owed, __ATOMIC_ACQUIRE)
-                          : TagFSHouseLooking();
-        if (!coming) {
-            kprintf("[TagFS] the house did not %s the volume laid on seat %u\n", vol ? "mount" : "take in",
-                    l->seat);
-            VolumeLayEnd(l, ERR_TAGFS_NOT_INITIALIZED);
-        }
+    if (vol && TagFSVolumeMounted(vol)) {
+        l->number = TagFSVolumeNumber(vol);
+        VolumeLayEnd(l, OK);
         return;
     }
-    l->vol    = vol;
-    l->number = TagFSVolumeNumber(vol);
-    TagFSVolume* home  = TagFSHome();
-    uint32_t     count = 0;
-    error_t      rc    = tagfs_enter(home) ? OK : ERR_DEVICE_NOT_READY;
-    if (rc == OK) {
-        rc = VolumeLayRoleFiles(l, home, &count);
-        tagfs_leave(home);
+    bool coming = vol ? __atomic_load_n(&vol->mount.arrival_owed, __ATOMIC_ACQUIRE) ||
+                        __atomic_load_n(&vol->mount.mount_owed, __ATOMIC_ACQUIRE)
+                      : TagFSHouseLooking();
+    if (!coming) {
+        kprintf("[TagFS] the house did not %s the volume laid on seat %u\n", vol ? "mount" : "take in", l->seat);
+        VolumeLayEnd(l, ERR_TAGFS_NOT_INITIALIZED);
     }
-    if (rc != OK) {
-        kprintf("[TagFS] the home volume keeps no kernel to lay on volume %u (error %u)\n", l->number,
-                (unsigned)rc);
-        VolumeLayEnd(l, rc);
-        return;
-    }
-    memset(&l->carry, 0, sizeof(l->carry));
-    l->carry.to      = vol;
-    l->carry.items   = l->items;
-    l->carry.count   = count;
-    l->carry.move    = false;
-    l->carry.maker   = true;
-    l->carry.warrant = INK_WARRANTED;
-    l->carry.ended   = VolumeLayCarried;
-    l->step          = VOLUME_LAY_ROLES;
-    rc = CarryBegin(&l->carry);
-    if (rc != OK)
-        VolumeLayEnd(l, rc);
-}
-
-/* The Deed amended to name the run of the kernel the carry laid, far copy
- * then head, and the volume's own account of it with it. */
-static error_t VolumeLayBootNamed(VolumeLaying* l)
-{
-    TagFSVolume* vol    = l->vol;
-    uint64_t     kernel = l->items[0].arrived;
-    FileSpot     spot;
-    VolumeBoot   boot;
-    memset(&boot, 0, sizeof(boot));
-    if (!tagfs_enter(vol))
-        return ERR_DEVICE_NOT_READY;
-    FileRecord* rec    = FileMapRecordHold(vol->state.files, kernel, NULL);
-    uint64_t    blocks = rec ? (rec->size + VOLUME_BLOCK_BYTES - 1u) / VOLUME_BLOCK_BYTES : 0;
-    bool        whole  = rec && blocks && FileRecordFind(rec, 0, &spot) && spot.kind == STRIP_DATA &&
-                         1u + (uint64_t)spot.left >= blocks && spot.block + blocks <= UINT32_MAX;
-    if (whole) {
-        boot.kernel_block  = (uint32_t)spot.block;
-        boot.kernel_blocks = (uint32_t)blocks;
-        boot.kernel_bytes  = (uint32_t)rec->size;
-    }
-    FileRecordRelease(rec);
-    tagfs_leave(vol);
-    if (!whole) {
-        kprintf("[TagFS] the kernel laid on volume %u is not one run — no loader could be pointed at it\n",
-                l->number);
-        return ERR_TAGFS_EXTENT_ERROR;
-    }
-
-    DeedCopy head;
-    DeedPen  pen;
-    error_t  rc = DeedReadHead(l->seat, &l->ground, &head);
-    if (rc != OK)
-        return rc;
-    uint8_t* keep = kmalloc(head.raw_bytes);
-    uint16_t bytes = 0;
-    VolumeBoot* stamp = NULL;
-    if (keep) {
-        memcpy(keep, head.raw, head.raw_bytes);
-        if (DeedPenTake(&pen, head.raw, head.raw_bytes) == 0)
-            stamp = DeedPenFind(&pen, VOLUME_STAMP_BOOT, &bytes);
-    }
-    rc = !keep ? ERR_NO_MEMORY : !stamp || bytes < sizeof(VolumeBoot) ? ERR_METADATA_CORRUPTED : OK;
-    if (rc == OK) {
-        memcpy(stamp, &boot, sizeof(boot));
-        if (!tagfs_enter(vol)) {
-            rc = ERR_DEVICE_NOT_READY;
-        } else {
-            bool written = DeedsAmendedWritten(vol, l->seat, &head, &pen, keep, head.head.sectors,
-                                               head.head.tail_sector, "the kernel its maker laid");
-            if (written) {
-                TagFSLockTake(&vol->state.lock);
-                vol->state.boot = boot;
-                TagFSLockDrop(&vol->state.lock);
-            }
-            tagfs_leave(vol);
-            rc = written ? OK : ERR_WRITE_FAILED;
-        }
-    }
-    kfree(keep);
-    DeedRelease(&head);
-    if (rc == OK)
-        kprintf("[TagFS] volume %u: its Deed names the kernel laid on it — %u block(s) from block %u\n", l->number,
-                boot.kernel_blocks, boot.kernel_block);
-    return rc;
-}
-
-static void VolumeLaySettled(SettleWaiter* w, error_t rc)
-{
-    VolumeLaying* l = container_of(w, VolumeLaying, wait);
-    l->came         = rc;
-    __atomic_store_n(&l->step, VOLUME_LAY_SETTLED, __ATOMIC_RELEASE);
-}
-
-/* The carry ended: the kernel named, and a cycle asked to settle all of it. */
-static void VolumeLayBoot(VolumeLaying* l)
-{
-    if (l->rc != OK) {
-        VolumeLayEnd(l, l->rc);
-        return;
-    }
-    error_t rc = VolumeLayBootNamed(l);
-    if (rc != OK) {
-        VolumeLayEnd(l, rc);
-        return;
-    }
-    if (!tagfs_enter(l->vol)) {
-        VolumeLayEnd(l, ERR_DEVICE_NOT_READY);
-        return;
-    }
-    uint64_t gen = InkedGen(l->vol);
-    error_t  now = SettleWaitNow(l->vol, gen);
-    l->came      = now;
-    __atomic_store_n(&l->step, now == ERR_WOULD_BLOCK ? VOLUME_LAY_SETTLING : VOLUME_LAY_SETTLED,
-                     __ATOMIC_RELEASE);
-    if (now == ERR_WOULD_BLOCK)
-        SettleWaitLink(l->vol, &l->wait, gen, VolumeLaySettled);
-    tagfs_leave(l->vol);
 }
 
 void VolumeLayServe(void)
 {
-    VolumeLaying* l = __atomic_load_n(&s_laying, __ATOMIC_ACQUIRE);
-    if (!l || __atomic_exchange_n(&s_serving, 1u, __ATOMIC_ACQ_REL))
+    if (!__atomic_load_n(&s_laying, __ATOMIC_ACQUIRE) || __atomic_exchange_n(&s_serving, 1u, __ATOMIC_ACQ_REL))
         return;
-    switch (__atomic_load_n(&l->step, __ATOMIC_ACQUIRE)) {
-    case VOLUME_LAY_TAKEN:   VolumeLayTaken(l); break;
-    case VOLUME_LAY_BOOT:    VolumeLayBoot(l); break;
-    case VOLUME_LAY_SETTLED: VolumeLayEnd(l, l->came); break;
-    default:                 break;     /* the carry's turns, or the cycle's: theirs to move it on */
-    }
+    VolumeLaying* l = __atomic_load_n(&s_laying, __ATOMIC_ACQUIRE);     /* ended meanwhile: none */
+    if (l)
+        VolumeLayTaken(l);
     __atomic_store_n(&s_serving, 0u, __ATOMIC_RELEASE);
 }

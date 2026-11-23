@@ -80,16 +80,16 @@ error_t TagFSInkPlot(TagFSVolume* vol, Plot* p, InkReceipt* out);
  * OK — a change that changes nothing is OK with no Ink — or the refusal. */
 error_t InkFields(TagFSVolume* vol, uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkReceipt* out);
 
-/* A file kept in a role as a volume's maker lays one — the image builder
- * (tools/create_tagfs_cargo.c), and the kernel laying a volume (a carry of
- * its maker, volume/carry.h): the record's role bits become `role`
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's way to keep a file in a role, as the image builder lays one
+ * (tools/create_tagfs_cargo.c): the record's role bits become `role`
  * (TAGFS_FILE_ROLE_*) by an ordinary Ink, the tags as they are. The tail is
- * laid in the file's block first, under its Helm (HelmEngross), as the loader
- * reads a file of a role by its blocks and no write lays a Slip on one
- * (plot_slip.c). No program asks it: the system has no call that puts a role
- * on a file a volume holds but its maker's, as it lays the volume. The stand
- * keeps one by it (helm/engross.h, EngrossRoled). */
+ * laid in the file's block first, under its Helm (helm/engross.h,
+ * EngrossRoled), as the loader reads a file of a role by its blocks and no
+ * write lays a Slip on one (plot_slip.c). No program asks it: the system has
+ * no call that puts a role on a file the volume already holds. */
 error_t InkRoleLaid(TagFSVolume* vol, uint64_t fid, uint32_t role, InkReceipt* out);
+#endif
 
 /* A book's file rolled back by the mount's verdict (mount/errata.h): its
  * record marked TAGFS_FILE_UNDONE by an ordinary Ink, its name and tags as
