@@ -110,6 +110,13 @@ void RandomBytes(void* out, size_t bytes)
     }
 }
 
+void RandomGuid(uint8_t out[16])
+{
+    RandomBytes(out, 16);
+    out[7] = (uint8_t)((out[7] & 0x0Fu) | 0x40u);
+    out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);
+}
+
 /* Rejection: a draw at or past the largest multiple of `bound` 64 bits hold
  * is drawn again, so no residue is likelier than another. At most one draw
  * in two is given back, for a bound just past 2^63; for the bounds asked of

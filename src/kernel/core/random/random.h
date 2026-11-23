@@ -27,4 +27,8 @@ void     RandomBytes(void* out, size_t bytes);
 /* A number in [0, bound), each as likely as the next; 0 for a bound of 0. */
 uint64_t RandomBelow(uint64_t bound);
 
+/* A version 4 GUID, in the order GPT and a Deed keep one: its third field
+ * little-endian, so the version is the high half of byte 7. */
+void     RandomGuid(uint8_t out[16]);
+
 #endif /* RANDOM_H */

@@ -5,6 +5,12 @@
 #include "manifest_auth.h"
 #include "process.h"
 
+bool ManifestCabinWears(const OpContext *ctx, uint32_t bits)
+{
+    if (!ctx || !ctx->proc || !ctx->proc->cabin) return true;
+    return (__atomic_load_n(&ctx->proc->cabin->auth_bits, __ATOMIC_RELAXED) & bits) == bits;
+}
+
 bool ManifestOpAuthorize(const OpRegistration *reg, const OpContext *ctx)
 {
     /* Kernel-internal manifests (selftest, init paths) bypass auth — they

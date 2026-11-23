@@ -17,7 +17,7 @@
 #include "hardware_deck.h"
 #include "crate_io.h"
 #include "process.h"
-#include "auth_tags.h"
+#include "manifest_auth.h"
 #include "tagfs.h"
 #include "boardroom.h"
 #include "disk_table.h"
@@ -169,20 +169,12 @@ int HwDisksList(const ManifestOp* op, Crate* crates, uint16_t crate_count, const
     return rc;
 }
 
-/* Whether the caller's box asked `change-disks` — the person's hands on the
- * disks; a manifest of the kernel's own carries no cabin and is the kernel's. */
-static bool DisksHandsSay(const OpContext* ctx)
-{
-    const cabin_t* cabin = ctx && ctx->proc ? ctx->proc->cabin : NULL;
-    return !cabin || (__atomic_load_n(&cabin->auth_bits, __ATOMIC_RELAXED) & AUTH_TAG_CHANGE_DISKS) != 0;
-}
-
 /* The disk a change names — [u8 seat][u32 seating] at the head of params —
  * and what stands on it. */
 static int DisksAsked(const ManifestOp* op, uint32_t more, const OpContext* ctx, uint8_t* seat, uint32_t* seating,
                       DisksStanding* standing, DiskInUse* used)
 {
-    if (!DisksHandsSay(ctx))
+    if (!ManifestCabinWears(ctx, AUTH_TAG_CHANGE_DISKS))   /* the person's hands on the disks */
         return ERR_ACCESS_DENIED;
     if (op->param_size < 5u + more)
         return ERR_INVALID_ARGUMENT;

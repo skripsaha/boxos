@@ -139,30 +139,15 @@ static const char *disks_refusal(int rc)
 
 /* ── asking ──────────────────────────────────────────────────────────────── */
 
-/* Yes or no from the person at the screen to `question`. */
+/* Yes or no from the person at the screen to `question` — nobody there is
+ * said, and is no. */
 static bool disks_agreed(const char *question)
 {
     if (!form_person_here()) {
         println("disks: nobody is at the screen to say yes, so nothing was changed");
         return false;
     }
-    for (;;) {
-        printf("%s (yes or no) ", question);
-        char *typed = NULL;
-        if (readline_grow(&typed) < 0) {
-            println("");
-            return false;
-        }
-        size_t from = 0, to = strlen(typed);
-        while (from < to && typed[from] == ' ') from++;
-        while (to > from && typed[to - 1] == ' ') to--;
-        typed[to] = '\0';
-        bool yes = strcmp(typed + from, "yes") == 0 || strcmp(typed + from, "y") == 0;
-        bool no  = strcmp(typed + from, "no") == 0 || strcmp(typed + from, "n") == 0;
-        free(typed);
-        if (yes || no) return yes;
-        printf("please answer yes or no. ");
-    }
+    return form_yes(question);
 }
 
 /* A size in K, M, G or T (thousands, an optional B after), into bytes; 0 for

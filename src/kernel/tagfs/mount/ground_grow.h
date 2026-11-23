@@ -23,13 +23,15 @@
  * far. Each reason it is not said. */
 bool GroundGrowRoom(TagFSVolume* vol, uint8_t seat, uint64_t ground_sectors, uint64_t have);
 
-/* The Deed in `head`, taken into `pen` and amended there by its format's own
- * part, written for a volume of `new_sectors` whose far copy sits at
- * `new_tail`: the far copy, flushed and read back, then the head, flushed.
- * True once the head is written. False, the Deed's bytes put back from `keep`
- * — the head's as it was read — and why said, when either did not take. */
-bool GroundGrowDeedsWritten(TagFSVolume* vol, uint8_t seat, DeedCopy *head, DeedPen *pen, const uint8_t *keep,
-                            uint64_t new_sectors, uint64_t new_tail);
+/* The Deed in `head`, taken into `pen` and amended there by its caller —
+ * the volume's growth (book_grow.c), the kernel its maker laid naming
+ * (volume_lay.c) — written for a volume of `sectors` whose far copy sits at
+ * `tail`: the far copy, flushed and read back, then the head, flushed. True
+ * once the head is written. False, the Deed's bytes put back from `keep` —
+ * the head's as it was read — and why said, `what` naming the change, when
+ * either did not take: the volume is as it was. */
+bool DeedsAmendedWritten(TagFSVolume* vol, uint8_t seat, DeedCopy *head, DeedPen *pen, const uint8_t *keep,
+                         uint64_t sectors, uint64_t tail, const char *what);
 
 /* The far copy the growth left behind, inside the data run now: erased by
  * `blank`, DEED_PEN_BYTES of the caller's, and said either way. The caller

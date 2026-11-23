@@ -188,3 +188,23 @@ int disk_mend(const DiskListed *disk)
 {
     return disk_changed(HW_DISK_MEND, disk, NULL, 0, NULL, 0);
 }
+
+int volume_lay(const DiskListed *disk, uint16_t entry, const char *name, uint32_t *number, uint32_t *roles)
+{
+    size_t  len = name ? strlen(name) : 0;
+    uint8_t params[9 + STORAGE_VOLUME_NAME_MOST];
+    uint8_t answer[8] = { 0 };
+    if (!disk || len > STORAGE_VOLUME_NAME_MOST) return -ERR_INVALID_ARGUMENT;
+    uint16_t len16 = (uint16_t)len;
+    params[0] = disk->Seat;
+    memcpy(params + 1, &disk->Seating, 4);
+    memcpy(params + 5, &entry, 2);
+    memcpy(params + 7, &len16, 2);
+    if (len) memcpy(params + 9, name, len);
+    int rc = MfCall1(DECK_STORAGE, STORAGE_VOLUME_LAY, params, (uint32_t)(9u + len), NULL, 0, answer,
+                     sizeof(answer), NULL, BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != 0) return box_fail(rc);
+    if (number) memcpy(number, answer, 4);
+    if (roles) memcpy(roles, answer + 4, 4);
+    return 0;
+}

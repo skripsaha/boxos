@@ -107,7 +107,7 @@ static bool BookGrowDeedsWritten(TagFSVolume* vol, uint8_t seat, uint64_t sector
         kprintf("[TagFS] seat %u: the deed at the head of this volume read and its pen would not take it — "
                 "nothing is taken\n", seat);
     else
-        written = GroundGrowDeedsWritten(vol, seat, &head, &pen, keep, sectors, tail);
+        written = DeedsAmendedWritten(vol, seat, &head, &pen, keep, sectors, tail, "the volume's new ground");
     kfree(keep);
     DeedRelease(&head);
     return written;

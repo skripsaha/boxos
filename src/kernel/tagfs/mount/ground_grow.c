@@ -47,8 +47,8 @@ bool GroundGrowRoom(TagFSVolume* vol, uint8_t seat, uint64_t ground_sectors, uin
     return true;
 }
 
-bool GroundGrowDeedsWritten(TagFSVolume* vol, uint8_t seat, DeedCopy *head, DeedPen *pen, const uint8_t *keep,
-                            uint64_t new_sectors, uint64_t new_tail)
+bool DeedsAmendedWritten(TagFSVolume* vol, uint8_t seat, DeedCopy *head, DeedPen *pen, const uint8_t *keep,
+                         uint64_t new_sectors, uint64_t new_tail, const char *what)
 {
     DeedPenSetGround(pen, new_sectors, new_tail);
 
@@ -81,9 +81,9 @@ bool GroundGrowDeedsWritten(TagFSVolume* vol, uint8_t seat, DeedCopy *head, Deed
 
     if (!far_end_took_it) {
         memcpy(head->raw, keep, head->raw_bytes);
-        kprintf("[TagFS] seat %u: the new far end at sector %llu would not take "
-                "its deed and give it back — the volume is left exactly as it "
-                "was\n", seat, (unsigned long long)new_tail);
+        kprintf("[TagFS] seat %u: the far copy of the deed at sector %llu would not "
+                "take %s and give it back — the volume is left exactly as it "
+                "was\n", seat, (unsigned long long)new_tail, what);
         return false;
     }
 
@@ -94,9 +94,8 @@ bool GroundGrowDeedsWritten(TagFSVolume* vol, uint8_t seat, DeedCopy *head, Deed
     if (tagfs_volume_write(vol, 0, DEED_PEN_SECTORS, head->raw) != 0 ||
         BoardroomFlush(seat) != 0) {
         memcpy(head->raw, keep, head->raw_bytes);
-        kprintf("[TagFS] seat %u: the deed at the head would not be written — "
-                "the volume stands at its old size and will try again on the "
-                "next mount\n", seat);
+        kprintf("[TagFS] seat %u: the deed at the head would not take %s — "
+                "the volume stands as it was\n", seat, what);
         return false;
     }
     return true;

@@ -6,17 +6,23 @@
  *   volumes 1               the one numbered 1
  *   volumes 1 Фото 2026     the one numbered 1 is called "Фото 2026" from now
  *                           on — kept in its book, the name goes with it
+ *   volumes new 2 1 Photos  a new volume laid on BoxOS's partition in entry
+ *                           1 of disk 2 (`disks` shows them), called
+ *                           "Photos", and given the system: the kernel and
+ *                           the programs the system keeps — once the person
+ *                           at the screen says yes
  */
 
 #include "box/print.h"
 #include "box/form.h"
 #include "box/memory.h"
 #include "box/file.h"
+#include "box/disk.h"
 #include "box/string.h"
 #include "box/error.h"
 #include "box/system.h"
 
-BOX_FORM("takes optional text \"a volume's number, and the name to give it\"\n");
+BOX_FORM("takes optional text \"a volume's number, and the name to give it; or new, a disk's number, a partition's entry and a name\"\n");
 
 /* One volume, one line: its number, what it is called, and what stands. */
 static void volumes_say(const VolumeListed *v)
@@ -68,6 +74,103 @@ static const char *volumes_refusal(int rc)
     }
 }
 
+/* What a refused laying is told as. */
+static const char *volumes_lay_refusal(int rc)
+{
+    switch (-rc) {
+    case ERR_ACCESS_DENIED:     return "only the person's hands lay a volume";
+    case ERR_OBJECT_NOT_FOUND:  return "the disk is not there any more, or another sits in its place";
+    case ERR_OUT_OF_RANGE:      return "the disk has no partition in that entry";
+    case ERR_INVALID_ARGUMENT:  return "the partition is not BoxOS's, or the name is no name";
+    case ERR_BUSY:              return "a volume of the house stands on it";
+    case ERR_TAGFS_NO_SPACE:    return "the partition is too small for a volume and the system";
+    case ERR_WOULD_BLOCK:       return "another volume is being laid: ask again";
+    case ERR_PERMISSION_DENIED: return "the disk refuses writes: it is protected";
+    case ERR_DEVICE_NOT_READY:  return "the disk left on the way";
+    default:                    return "the disk refused it";
+    }
+}
+
+/* A number at *at, the spaces after it passed: false for no number. */
+static bool volumes_number(const char **at, uint32_t *out)
+{
+    const char *p = *at;
+    uint32_t    n = 0;
+    if (*p < '0' || *p > '9') return false;
+    while (*p >= '0' && *p <= '9' && n <= 0xFFFFu) n = n * 10u + (uint32_t)(*p++ - '0');
+    if (*p && *p != ' ') return false;
+    while (*p == ' ') p++;
+    *at  = p;
+    *out = n;
+    return true;
+}
+
+/* `volumes new <disk> <entry> [name]`: the partition shown, a yes asked, and
+ * the volume laid and given the system. */
+static int volumes_new(const char *at)
+{
+    uint32_t seat = 0, entry = 0;
+    if (!volumes_number(&at, &seat) || !volumes_number(&at, &entry)) {
+        println("A volume is laid on a partition: volumes new <disk> <entry> [name] — `disks` shows them");
+        return 1;
+    }
+    if (strlen(at) > STORAGE_VOLUME_NAME_MOST) {
+        printf("A volume's name is %u bytes at the most\n", STORAGE_VOLUME_NAME_MOST);
+        return 1;
+    }
+    DiskListed *disks = NULL;
+    size_t      count = 0;
+    if (disk_list(&disks, &count) != 0) {
+        println("The disks could not be listed");
+        return 1;
+    }
+    const DiskListed     *d = NULL;
+    const DiskPartListed *p = NULL;
+    for (size_t i = 0; i < count; i++)
+        if (disks[i].Seat == seat) d = &disks[i];
+    for (size_t i = 0; d && i < d->PartCount; i++)
+        if (d->Parts[i].Entry == entry) p = &d->Parts[i];
+    int status = 1;
+    if (!d) {
+        printf("There is no disk numbered %u\n", seat);
+    } else if (!p) {
+        printf("Disk %u has no partition in entry %u\n", seat, entry);
+    } else if (p->Kind != DISK_PART_BOXOS) {
+        printf("Entry %u of disk %u is %s partition, not BoxOS's: `disks %u add boxos` lays one\n", entry, seat,
+               DiskKindName((DiskPartKind)p->Kind), seat);
+    } else if (p->Mounted) {
+        printf("A volume of the house stands on entry %u of disk %u: no volume is laid over it\n", entry, seat);
+    } else {
+        char size[24];
+        size_shown(p->Blocks * d->BlockBytes, size, sizeof(size));
+        printf("A new volume on entry %u of disk %u, %s%s%s%s: whatever the partition holds is gone, and it is "
+               "given the system — the kernel and the programs the system keeps\n", entry, seat, size,
+               *at ? ", called \"" : "", at, *at ? "\"" : "");
+        uint32_t number = 0, roles = 0;
+        if (!form_person_here()) {
+            println("volumes: nobody is at the screen to say yes, so nothing was laid");
+        } else if (!form_yes("lay it?")) {
+            println("Nothing was laid");
+            status = 0;
+        } else {
+            int rc = volume_lay(d, (uint16_t)entry, at, &number, &roles);
+            if (rc != 0) {
+                printf("No volume was laid on disk %u: %s\n", seat, volumes_lay_refusal(rc));
+            } else {
+                printf("Volume %u is laid on disk %u, %u file(s) of the system on it\n", number, seat, roles);
+                VolumeListed *v = NULL;
+                if (volume_info(number, &v) == 0) {
+                    volumes_say(v);
+                    free(v);
+                }
+                status = 0;
+            }
+        }
+    }
+    free(disks);
+    return status;
+}
+
 int main(void)
 {
     const char *text = form_text(0);
@@ -77,6 +180,11 @@ int main(void)
     }
     if (!text[0]) {
         int rc = volumes_list();
+        exit(rc);
+        return rc;
+    }
+    if (strncmp(text, "new ", 4) == 0) {
+        int rc = volumes_new(text + 4);
         exit(rc);
         return rc;
     }

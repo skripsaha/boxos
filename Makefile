@@ -1855,7 +1855,7 @@ PACK_ASKS_SEE_TAGS    = files seek tagmap info delete hexer stringview passport 
 PackTagsAsk = $(if $(filter $(1),$(PACK_ASKS_CHANGE_TAGS)),--ask change-tags,$(if $(filter $(1),$(PACK_ASKS_SEE_TAGS)),--ask see-tags))
 # ‼ THE DISKS' TABLES are changed by the programs that lay partitions as the
 # person's hands (box_reader.h, `ask change-disks`); every program may see them.
-PACK_ASKS_CHANGE_DISKS = disks
+PACK_ASKS_CHANGE_DISKS = disks volumes
 PackDisksAsk = $(if $(filter $(1),$(PACK_ASKS_CHANGE_DISKS)),--ask change-disks)
 PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask utility) \
            $(call PackTagsAsk,$(basename $(notdir $(1)))) $(call PackDisksAsk,$(basename $(notdir $(1))))

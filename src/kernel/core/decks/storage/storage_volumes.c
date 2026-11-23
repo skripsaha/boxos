@@ -19,6 +19,7 @@
 #include "volume_name.h"
 #include "volume_tally.h"
 #include "settle_ops.h"
+#include "manifest_auth.h"
 
 _Static_assert(STORAGE_VOLUME_NAME_MOST == TALLY_VOLUME_NAME_MOST, "a volume's name, as the deck and the book bound it");
 
@@ -170,4 +171,21 @@ int ObjMove(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpC
 {
     (void)crate_count;
     return ObjCarry(op, crates, ctx, true);
+}
+
+/* STORAGE_VOLUME_LAY  params: [u8 seat][u32 seating][u16 entry][u16 name_len][name];
+ * out_crate (optional): [u32 number][u32 roles] */
+int ObjVolumeLay(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->param_size < 9u) return ERR_INVALID_ARGUMENT;
+    if (!ManifestCabinWears(ctx, AUTH_TAG_CHANGE_DISKS)) return ERR_ACCESS_DENIED;   /* the person's hands on the disks */
+    uint32_t seating;
+    uint16_t entry, len;
+    memcpy(&seating, op->params + 1, 4);
+    memcpy(&entry, op->params + 5, 2);
+    memcpy(&len, op->params + 7, 2);
+    if (op->param_size < 9u + len) return ERR_INVALID_ARGUMENT;
+    Crate *out = op->out_crate == CRATE_INDEX_NONE ? NULL : &crates[op->out_crate];
+    return SettleVolumeLaid(op->params[0], seating, entry, op->params + 9, len, ctx, crates, out);
 }

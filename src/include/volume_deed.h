@@ -297,6 +297,22 @@ typedef struct __attribute__((packed)) {
 } VolumeFrame;
 _Static_assert(sizeof(VolumeFrame) == 24, "VolumeFrame is 24 bytes on the medium");
 
+/* The GEOMETRY every maker of this format lays a volume out for — a decision
+ * of the format's, not a fact about any medium: its numbers counted in
+ * 512-byte sectors, everything of it on a 4096-byte grid (the kernel compares
+ * this with what the medium says of itself, and says so when the volume
+ * assumed a finer grid than the medium has), the conventional mebibyte grain,
+ * and the volume's own block. */
+static inline VolumeGeometry VolumeGeometryLaid(void)
+{
+    VolumeGeometry g;
+    g.logical_bytes  = VOLUME_DEED_SECTOR_BYTES;
+    g.physical_bytes = VOLUME_BLOCK_BYTES;
+    g.grain_bytes    = 1024u * 1024u;
+    g.block_bytes    = VOLUME_BLOCK_BYTES;
+    return g;
+}
+
 /* The ring as a maker of this format lays it down (above). */
 #define VOLUME_FRAME_SPINE_SLOTS  3u
 

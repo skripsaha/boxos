@@ -493,6 +493,7 @@ error_t StorageDeckRegister(void)
         /* The person's hands alone carry files between volumes (storage_volumes.c). */
         { STORAGE_OBJ_COPY,     ObjCopy,         OP_AUTH_APP, "storage.copy"     },
         { STORAGE_OBJ_MOVE,     ObjMove,         OP_AUTH_APP, "storage.move"     },
+        { STORAGE_VOLUME_LAY,   ObjVolumeLay,    OP_AUTH_APP, "storage.volume.lay" },
         { STORAGE_OBJ_ANCHOR,   ObjAnchor,       OP_AUTH_APP, "storage.anchor"     },
         { STORAGE_OBJ_WRITE_SETTLED, ObjWriteSettled, OP_AUTH_APP, "storage.write.settled" },
         /* Escheat lets a rotten range's files and blocks go for good: system. */

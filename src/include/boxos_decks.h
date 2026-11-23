@@ -581,6 +581,24 @@
  * short is never taken for the file: the volume lets it go. */
 #define STORAGE_OBJ_COPY            0x2E
 #define STORAGE_OBJ_MOVE            0x2F
+/* volume.lay — a new volume laid on a BoxOS partition of a disk, and given
+ * the system: every file the home volume keeps in a role, the kernel first,
+ * which its Deed then names for a loader (the kernel's VolumeLay). By the
+ * person's hands on the disks (change-disks; ERR_ACCESS_DENIED otherwise).
+ * params = [u8 seat][u32 seating][u16 entry][u16 name_len][name], the disk as
+ * hw.disks.list gave it and the partition's entry there, the name UTF-8 of any
+ * language, at most STORAGE_VOLUME_NAME_MOST, none for 0. out_crate (optional)
+ * = [u32 the volume's number in the house][u32 the files the system keeps
+ * laid on it]. The answer comes once a cycle of the new volume settled all of
+ * it: OK; ERR_WOULD_BLOCK while another laying is under way;
+ * ERR_OBJECT_NOT_FOUND for a seat that is empty or holds another disk since;
+ * ERR_OUT_OF_RANGE for no partition in that entry; ERR_INVALID_ARGUMENT for a
+ * partition that is not BoxOS's, or a name that is no name; ERR_BUSY for one a
+ * volume of the house stands on; ERR_TAGFS_NO_SPACE for one too small for the
+ * book or the system; ERR_PERMISSION_DENIED for a medium that refuses writes;
+ * ERR_DEVICE_NOT_READY for one that left. Laid, the partition holds a volume
+ * the house has taken in, whatever came after. */
+#define STORAGE_VOLUME_LAY          0x30
 #define STORAGE_VOLUME_LISTED_HEAD  52u     /* a record before its name */
 #define STORAGE_VOLUME_HOME         0x01u   /* flags: the volume the machine was booted from */
 #define STORAGE_VOLUME_MOUNTED      0x02u   /* its book is read and its files are found */

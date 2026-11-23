@@ -49,15 +49,6 @@ typedef struct {
     uint8_t* entries;         /* entry_count × entry_bytes, owned */
 } DiskPlan;
 
-/* A version 4 GUID of the random source's, in the order GPT keeps one: its
- * third field little-endian, so the version is the high half of byte 7. */
-static void DiskGuidNew(uint8_t out[16])
-{
-    RandomBytes(out, 16);
-    out[7] = (uint8_t)((out[7] & 0x0Fu) | 0x40u);
-    out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);
-}
-
 static void DiskPutLe32(uint8_t* p, uint32_t v)
 {
     for (uint32_t i = 0; i < 4; i++)
@@ -308,7 +299,7 @@ error_t DiskTableLay(uint8_t seat, uint32_t seating, const DiskInUse* used)
     }
     DiskPlan p;
     memset(&p, 0, sizeof(p));
-    DiskGuidNew(p.disk_guid);
+    RandomGuid(p.disk_guid);
     p.entry_count   = GPT_WRITE_ENTRIES;
     p.entry_bytes   = GPT_WRITE_ENTRY_BYTES;
     p.first_entries = GPT_HEADER_LBA + 1u;
@@ -387,7 +378,7 @@ error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t
         uint8_t* e = p.entries + (uint64_t)slot * p.entry_bytes;
         memset(e, 0, p.entry_bytes);
         memcpy(e + GPT_ENTRY_TYPE_OFFSET, kind == DISK_PART_ESP ? esp : boxos, 16);
-        DiskGuidNew(e + GPT_ENTRY_UNIQUE_OFFSET);
+        RandomGuid(e + GPT_ENTRY_UNIQUE_OFFSET);
         DiskPutLe64(e + GPT_ENTRY_FIRST_OFFSET, first);
         DiskPutLe64(e + GPT_ENTRY_LAST_OFFSET, first + blocks - 1u);
         DiskNameLay(e + GPT_ENTRY_NAME_OFFSET, kind == DISK_PART_ESP ? "EFI system partition" : "BoxOS");

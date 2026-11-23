@@ -296,15 +296,5 @@ FILE* GroundOpen(const char* disk_path) {
 
 /* The GEOMETRY stamp, the same for every volume this tool makes. */
 VolumeGeometry DeedGeometry(void) {
-    VolumeGeometry geo;
-    memset(&geo, 0, sizeof(geo));
-    geo.logical_bytes  = TAGFS_SECTOR_BYTES;
-    /* What the volume was laid out FOR, which is a decision made here and not
-     * a fact about the image file: everything below sits on a 4096-byte grid.
-     * The kernel compares this against what the medium says of itself, and
-     * says so when a volume assumed a finer grid than the medium has. */
-    geo.physical_bytes = TAGFS_BLOCK_SIZE;
-    geo.grain_bytes    = 1024u * 1024u;      /* the volume starts on a 1 MiB step */
-    geo.block_bytes    = TAGFS_BLOCK_SIZE;
-    return geo;
+    return VolumeGeometryLaid();
 }

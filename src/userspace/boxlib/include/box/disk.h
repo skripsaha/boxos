@@ -78,6 +78,18 @@ int disk_add(const DiskListed *disk, uint8_t kind, uint64_t first, uint64_t bloc
 int disk_remove(const DiskListed *disk, uint16_t entry);
 int disk_mend(const DiskListed *disk);
 
+/* A new volume laid on BoxOS's partition in `entry` of `disk`, called `name`
+ * (NULL or "" for none), and given the system — every file the home volume
+ * keeps in a role, the kernel its Deed names for a loader — by the person's
+ * hands (change-disks in the box). Answered once all of it is settled: 0, its
+ * number in the house in *number and the files the system keeps laid on it in
+ * *roles (either may be NULL); or a negative -error_t: -ERR_BUSY for a
+ * partition a volume of the house stands on, -ERR_INVALID_ARGUMENT for one
+ * that is not BoxOS's or a name that is no name, -ERR_TAGFS_NO_SPACE for one
+ * too small, -ERR_WOULD_BLOCK while another laying is under way, and the
+ * disks' refusals above. */
+int volume_lay(const DiskListed *disk, uint16_t entry, const char *name, uint32_t *number, uint32_t *roles);
+
 /* What a partition is called is DiskKindName (boxos_disks.h), and where one
  * may begin DiskGrainBlocks(disk->BlockBytes, disk->PhysicalBytes): the
  * kernel's own rules, one copy of each. */

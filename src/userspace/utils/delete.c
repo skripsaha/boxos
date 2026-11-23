@@ -131,27 +131,6 @@ static void show_going(const Going *going)
                programs == 1 ? "it" : "they");
 }
 
-/* Yes or no from the person at the screen. */
-static bool agreed(size_t count)
-{
-    for (;;) {
-        printf("delete %s? (yes or no) ", count == 1 ? "it" : "them");
-        char *typed = NULL;
-        if (readline_grow(&typed) < 0) {
-            println("");
-            return false;
-        }
-        size_t from = 0, to = strlen(typed);
-        while (from < to && typed[from] == ' ') from++;
-        while (to > from && typed[to - 1] == ' ') to--;
-        typed[to] = '\0';
-        bool yes = strcmp(typed + from, "yes") == 0 || strcmp(typed + from, "y") == 0;
-        bool no  = strcmp(typed + from, "no") == 0 || strcmp(typed + from, "n") == 0;
-        free(typed);
-        if (yes || no) return yes;
-        printf("please answer yes or no. ");
-    }
-}
 
 /* Each file deleted; one the system keeps stays, and is said. True when every
  * one went. */
@@ -213,7 +192,7 @@ int main(void)
         if (!form_person_here()) {
             println("delete: nobody is at the screen to say yes, so nothing was deleted");
             status = 1;
-        } else if (!agreed(going.Count)) {
+        } else if (!form_yes(going.Count == 1 ? "delete it?" : "delete them?")) {
             println("Nothing was deleted");
         } else if (!delete_all(&going)) {
             status = 1;

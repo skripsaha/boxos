@@ -63,4 +63,9 @@ static inline bool auth_level_permits(uint32_t auth_bits, uint32_t level)
 /* `reg` is the op's registration, as the caller has looked it up already. */
 bool ManifestOpAuthorize(const OpRegistration *reg, const OpContext *ctx);
 
+/* Whether the caller's cabin wears every one of `bits` (AUTH_TAG_*) — what
+ * its box asked (box_reader.h) — as its authority stands now. A manifest of
+ * the kernel's own carries no cabin and is the kernel's. */
+bool ManifestCabinWears(const OpContext *ctx, uint32_t bits);
+
 #endif /* MANIFEST_AUTH_H */

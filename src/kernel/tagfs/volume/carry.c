@@ -227,13 +227,15 @@ static error_t CarryRead(Carry* c, TagFSVolume* from, uint64_t fid)
         }
     }
     error_t rc = rec ? OK : ERR_BUSY;
-    if (rc == OK && (rec->flags & TAGFS_FILE_ROLE_MASK)) {
+    if (rc == OK && (rec->flags & TAGFS_FILE_ROLE_MASK) && !c->maker) {
         kprintf("[TagFS] file %llu of volume %u is kept by the system — a volume's maker lays such a file, "
                 "no carry takes it\n", (unsigned long long)fid, TagFSVolumeNumber(from));
         rc = ERR_PERMISSION_DENIED;
     }
     if (rc == OK) {
         c->flags       = rec->flags;
+        c->role        = rec->flags & TAGFS_FILE_ROLE_MASK;
+        c->role_step   = 0;
         c->size        = rec->size;
         c->created_ns  = rec->created_time;
         c->modified_ns = rec->modified_time;
@@ -389,7 +391,7 @@ static void CarryBorn(Carry* c)
     else if (c->size)
         CarryNext(c, c->items[c->done].from, CARRY_READ);
     else
-        CarryNext(c, c->to, CARRY_MARKS);
+        CarryNext(c, c->to, c->role ? CARRY_ROLE : CARRY_MARKS);
 }
 
 // ----------------------------------------------------------------------------
@@ -418,6 +420,30 @@ static void CarryPieceRead(Carry* c)
     CarryNext(c, c->to, CARRY_WRITE);
 }
 
+/* The copy's Helm, the carry's for this turn — inside `to`'s door. True when
+ * it is held now; false when it is to be handed (CarryHelmHanded) or is gone
+ * (CarryHelmGone), the door left and the next turn theirs. */
+static bool CarryHelmHeld(Carry* c)
+{
+    if (__atomic_load_n(&c->holds, __ATOMIC_ACQUIRE))
+        return true;
+    c->helm = (HelmWaiter){ .hand = CarryHelmHanded, .gone = CarryHelmGone };
+    if (!HelmAsk(c->to, c->dst->ofe, &c->helm)) {
+        tagfs_leave(c->to);
+        return false;
+    }
+    __atomic_store_n(&c->holds, 1u, __ATOMIC_RELEASE);
+    return true;
+}
+
+/* The copy's Helm given back at the end of a turn, and `to`'s door left. */
+static void CarryHelmLetGo(Carry* c)
+{
+    __atomic_store_n(&c->holds, 0u, __ATOMIC_RELEASE);
+    HelmLetGo(c->to, c->dst->ofe, &c->helm);
+    tagfs_leave(c->to);
+}
+
 /* One window of the piece written to the copy, under its Helm — asked a
  * window at a time, so what else works on the file goes between two. */
 static void CarryPieceWrite(Carry* c)
@@ -430,22 +456,13 @@ static void CarryPieceWrite(Carry* c)
         CarryFail(c, ERR_DEVICE_NOT_READY);
         return;
     }
-    if (!__atomic_load_n(&c->holds, __ATOMIC_ACQUIRE)) {
-        c->helm = (HelmWaiter){ .hand = CarryHelmHanded, .gone = CarryHelmGone };
-        bool held = HelmAsk(c->to, c->dst->ofe, &c->helm);
-        if (!held) {
-            tagfs_leave(c->to);
-            return;      /* handed (CarryHelmHanded), or gone (CarryHelmGone): the next turn is theirs */
-        }
-        __atomic_store_n(&c->holds, 1u, __ATOMIC_RELEASE);
-    }
+    if (!CarryHelmHeld(c))
+        return;
     PlotSource src   = { .kernel = c->piece + c->piece_at, .bytes = c->piece_len - c->piece_at };
     uint64_t   inked = 0;
     c->dst->offset   = c->offset + c->piece_at;
     error_t rc       = HelmWriteWindow(c->to, c->dst, &src, &inked);
-    __atomic_store_n(&c->holds, 0u, __ATOMIC_RELEASE);
-    HelmLetGo(c->to, c->dst->ofe, &c->helm);
-    tagfs_leave(c->to);
+    CarryHelmLetGo(c);
     c->piece_at += inked;
     if (rc == ERR_WOULD_BLOCK) {
         CarryRoomWait(c, c->to, CARRY_WRITE);
@@ -458,8 +475,68 @@ static void CarryPieceWrite(Carry* c)
         if (c->offset < c->size)
             CarryNext(c, c->items[c->done].from, CARRY_READ);
         else
-            CarryNext(c, c->to, CARRY_MARKS);
+            CarryNext(c, c->to, c->role ? CARRY_ROLE : CARRY_MARKS);
     }
+}
+
+// ----------------------------------------------------------------------------
+// ROLE, the maker's
+// ----------------------------------------------------------------------------
+
+/* How far CARRY_ROLE has come with the file (Carry.role_step). */
+enum { CARRY_ROLE_GATHER = 0, CARRY_ROLE_TAIL, CARRY_ROLE_KEPT, CARRY_ROLE_DONE };
+
+/* The maker's, for a file the system keeps: the kernel's file gathered into
+ * one run, a window a turn — the run the Deed's BOOT names; the tail laid in
+ * the last block, which the loader reads a file of a role by; and the role
+ * kept on the copy. All under the copy's Helm while it is still arriving: no
+ * write lays a Slip between the two Inks, and a file gathered before it wears
+ * its role, as a file the system keeps is moved by nobody. */
+static void CarryRoleKept(Carry* c)
+{
+    if (c->came != OK) {
+        CarryFail(c, c->came);
+        return;
+    }
+    if (!tagfs_enter(c->to)) {
+        CarryFail(c, ERR_DEVICE_NOT_READY);
+        return;
+    }
+    if (!CarryHelmHeld(c))
+        return;
+    error_t rc   = OK;
+    bool    more = false;
+    if (c->role_step == CARRY_ROLE_GATHER) {
+        bool ended = true;
+        if (c->role == TAGFS_FILE_ROLE_KERNEL && c->size)
+            rc = HelmDefragWindow(c->to, c->dst, &c->gather, &ended);
+        if (rc == OK && ended) {
+            HelmDefragLetGo(c->to, &c->gather);
+            c->role_step = CARRY_ROLE_TAIL;
+        }
+        more = rc == OK && !ended;
+    }
+    if (rc == OK && c->role_step == CARRY_ROLE_TAIL) {
+        bool laid = false;
+        rc = HelmEngross(c->to, c->dst, &laid);
+        if (rc == OK)
+            c->role_step = CARRY_ROLE_KEPT;
+    }
+    if (rc == OK && c->role_step == CARRY_ROLE_KEPT) {
+        InkReceipt receipt;
+        rc = InkRoleLaid(c->to, c->copy, c->role, &receipt);
+        if (rc == OK) {
+            c->copy_gen  = receipt.gen;
+            c->role_step = CARRY_ROLE_DONE;
+        }
+    }
+    CarryHelmLetGo(c);
+    if (rc == ERR_WOULD_BLOCK)
+        CarryRoomWait(c, c->to, CARRY_ROLE);
+    else if (rc != OK)
+        CarryFail(c, rc);
+    else
+        CarryNext(c, c->to, more ? CARRY_ROLE : CARRY_MARKS);
 }
 
 // ----------------------------------------------------------------------------
@@ -582,6 +659,10 @@ static void CarryEnd(Carry* c)
         __atomic_store_n(&c->holds, 0u, __ATOMIC_RELEASE);
         HelmLetGo(c->to, c->dst->ofe, &c->helm);
     }
+    if (c->gather.loaded && tagfs_enter(c->to)) {
+        HelmDefragLetGo(c->to, &c->gather);
+        tagfs_leave(c->to);
+    }
     if (c->dst) {
         tagfs_close(c->to, c->dst);
         c->dst = NULL;
@@ -622,6 +703,7 @@ static void CarryTurn(HelmWaiter* w)
     case CARRY_BORN:   CarryBorn(c); break;
     case CARRY_READ:   CarryPieceRead(c); break;
     case CARRY_WRITE:  CarryPieceWrite(c); break;
+    case CARRY_ROLE:   CarryRoleKept(c); break;
     case CARRY_MARKS:  CarryMarks(c); break;
     case CARRY_SETTLE: CarrySettled(c); break;
     case CARRY_LEAVE:  CarryLeave(c); break;
@@ -641,6 +723,8 @@ error_t CarryBegin(Carry* c)
     c->dropped = 0;
     c->came    = OK;
     c->holds   = 0;
+    c->role    = 0;
+    memset(&c->gather, 0, sizeof(c->gather));
     c->turn    = (HelmWaiter){ .run = CarryTurn };
     CarryNext(c, c->items[0].from, CARRY_SURVEY);
     return OK;

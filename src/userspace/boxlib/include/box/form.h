@@ -149,6 +149,12 @@ int souvenir_things(const file_id_t *ids, size_t count);
  * would ask, nobody answers, and its reading would wait for ever. */
 bool form_person_here(void);
 
+/* Yes or no from the person at the screen to `question`, asked as
+ * "QUESTION (yes or no) " until one of yes, y, no or n is typed: true for
+ * yes. False with nothing asked when nobody is there (form_person_here), or
+ * when the reading ends. */
+bool form_yes(const char *question);
+
 /* The file this program's screen is, when an arrow made it one (`screen #ID`):
  * what it prints is added to that file. 0 when what it prints reaches the
  * person. A program that takes the whole glass asks this first — under an

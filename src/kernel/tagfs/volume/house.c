@@ -4,6 +4,7 @@
 #include "logbook.h"
 #include "../deed/deed.h"
 #include "../settle/settle.h"
+#include "volume_lay.h"
 
 /*
  * ‼ THE HOUSE: EVERY VOLUME THE MACHINE HOLDS.
@@ -341,12 +342,23 @@ void TagFSAttendArrival(void)
         TagFSVolumeAttend(vol);
 }
 
+void TagFSHouseLook(void)
+{
+    __atomic_store_n(&s_survey_owed, 1u, __ATOMIC_RELEASE);
+}
+
+bool TagFSHouseLooking(void)
+{
+    return __atomic_load_n(&s_survey_owed, __ATOMIC_ACQUIRE) || __atomic_load_n(&s_surveying, __ATOMIC_ACQUIRE);
+}
+
 void TagFSServiceIfPending(void)
 {
     if (__atomic_load_n(&s_survey_owed, __ATOMIC_ACQUIRE) && __atomic_load_n(&s_boot_settled, __ATOMIC_ACQUIRE))
         HouseSurvey();
     for (TagFSVolume* vol = &s_home; vol; vol = TagFSVolumeNext(vol))
         TagFSVolumeService(vol);
+    VolumeLayServe();
 }
 
 void TagFSMemoryCameBack(void)

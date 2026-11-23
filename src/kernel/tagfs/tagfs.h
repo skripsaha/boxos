@@ -57,6 +57,12 @@ void         TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out);
  * not touch (DiskInUse, disk_table.h). */
 uint32_t     TagFSVolumesOn(uint8_t seat, uint32_t* numbers, uint64_t* grounds, uint32_t max);
 
+/* The house asked to look at every seat again — a volume laid where there was
+ * none (volume/volume_lay.h) is taken in as one met on a medium arriving —
+ * and whether a look is owed or under way. */
+void         TagFSHouseLook(void);
+bool         TagFSHouseLooking(void);
+
 /* The sixteen bytes volume `vol` calls itself (its Deed's); zeros for the home
  * volume before it stands on one. */
 void         TagFSVolumeUuid(const TagFSVolume* vol, uint8_t out[16]);

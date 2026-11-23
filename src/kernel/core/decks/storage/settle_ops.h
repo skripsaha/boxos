@@ -53,6 +53,15 @@ int SettleVolumeNamed(TagFSVolume *vol, const char *text, size_t len, const OpCo
 int SettleCarried(TagFSVolume *to, const uint64_t *ids, uint32_t count, bool move, const OpContext *ctx,
                   Crate *crates, Crate *out);
 
+/* A volume laid on BoxOS's partition in `entry` of the disk in `seat` — the
+ * occupant `seating` — called `name` (`len` bytes, 0 for none), and given the
+ * system (volume/volume_lay.h). `out`, when there is one, takes [u32 its
+ * number in the house][u32 the files the system keeps laid on it]. A program
+ * is parked until the laying is over (ERR_WOULD_BLOCK) and answered OK or its
+ * refusal; a caller in the kernel is answered so in its call. */
+int SettleVolumeLaid(uint8_t seat, uint32_t seating, uint16_t entry, const uint8_t *name, uint32_t len,
+                     const OpContext *ctx, Crate *crates, Crate *out);
+
 /*
  * A storage deck handler whose operation the volume answered ERR_WOULD_BLOCK —
  * room a Settle cycle gives back, nothing of the operation done — hands it

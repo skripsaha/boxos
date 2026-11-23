@@ -12,6 +12,8 @@
 #include "box/core/form_internal.h"
 #include "box/luggage.h"
 #include "box/string.h"
+#include "box/print.h"
+#include "box/memory.h"
 
 bool form_records_start(FormRecords *records, const char *bytes, size_t length)
 {
@@ -111,6 +113,28 @@ bool form_person_here(void)
 {
     Luggage l = luggage_carried();
     return l.length != 0 && form_records_here(l.bytes, l.length);
+}
+
+bool form_yes(const char *question)
+{
+    if (!form_person_here()) return false;
+    for (;;) {
+        printf("%s (yes or no) ", question);
+        char *typed = NULL;
+        if (readline_grow(&typed) < 0) {
+            println("");
+            return false;
+        }
+        size_t from = 0, to = strlen(typed);
+        while (from < to && typed[from] == ' ') from++;
+        while (to > from && typed[to - 1] == ' ') to--;
+        typed[to] = '\0';
+        bool yes = strcmp(typed + from, "yes") == 0 || strcmp(typed + from, "y") == 0;
+        bool no  = strcmp(typed + from, "no") == 0 || strcmp(typed + from, "n") == 0;
+        free(typed);
+        if (yes || no) return yes;
+        printf("please answer yes or no. ");
+    }
 }
 
 file_id_t form_screen_file(void)

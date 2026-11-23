@@ -51,6 +51,7 @@
 #include "use_memory.h"
 #include "volume_name.h"
 #include "carry.h"
+#include "volume_lay.h"
 #include "escheat.h"
 #include "conjugate.h"
 #include "async/write_job.h"   /* StorageCallWarrant */
@@ -64,6 +65,7 @@ typedef enum {
     SETTLE_OP_USE,
     SETTLE_OP_NAME,
     SETTLE_OP_CARRY,
+    SETTLE_OP_LAY,
     SETTLE_OP_ROOM,
 } SettleOpKind;
 
@@ -77,8 +79,9 @@ typedef struct {
     uint8_t      kind;           /* SettleOpKind */
     uint64_t     ticket;         /* USE: the demand the word is (UseMemorySay); NAME: the name (VolumeNameSay) */
     UseText*     said;           /* USE: the word, held until the answer */
-    Crate*       out;            /* USE, CARRY: the out crate, inside the staged crates */
+    Crate*       out;            /* USE, CARRY, LAY: the out crate, inside the staged crates */
     struct CarryCall* carry;     /* CARRY: the carry it waits for, let go with the answer */
+    struct LayCall*   lay;       /* LAY: the laying it waits for, let go with the answer */
     Crate*       crates_kbuf;    /* the staged crates, released with the answer */
     uint16_t     crate_count;
     uintptr_t    crates_uaddr;
@@ -181,6 +184,30 @@ static void SettleCarrySay(const CarryCall* call, Crate* out, vmm_context_t* vmm
     kfree(kp);
 }
 
+/* A laying a deck call began (SettleVolumeLaid), and how its end is answered
+ * — the parked program's wait, or the kernel caller's flag. Let go with the
+ * answer. */
+typedef struct LayCall {
+    VolumeLaying      laying;
+    SettleOpWait*     parked;     /* the program's; NULL for a caller in the kernel */
+    volatile uint32_t ended;      /* the kernel caller's: the laying is over */
+} LayCall;
+
+/* What a laying answers into `out` — [u32 number][u32 roles] — through `vmm`,
+ * the parked program's pages, or as the kernel's own crate with none. */
+static void SettleLaySay(const LayCall* call, Crate* out, vmm_context_t* vmm)
+{
+    uint8_t kp[8];
+    if (!out)
+        return;
+    memcpy(kp, &call->laying.number, 4);
+    memcpy(kp + 4, &call->laying.roles, 4);
+    bool said = vmm ? vmm_user_buf_commit_out(vmm, (uintptr_t)out->addr, kp, sizeof(kp)) == OK
+                    : crate_write(out, NULL, kp, sizeof(kp)) == OK;
+    if (said)
+        out->size = sizeof(kp);
+}
+
 static void SettleOpAnswered(SettleWaiter* w, error_t rc)
 {
     SettleOpWait*  s      = (SettleOpWait*)w;
@@ -200,12 +227,17 @@ static void SettleOpAnswered(SettleWaiter* w, error_t rc)
         if (s->carry)
             SettleCarrySay(s->carry, s->out, vmm);
         answer = rc;
+    } else if (s->kind == SETTLE_OP_LAY) {
+        if (s->lay)
+            SettleLaySay(s->lay, s->out, vmm);
+        answer = rc;
     } else if (s->kind != SETTLE_OP_ROOM) {
         SettleOpSay(s->kind, s->file_id, pid, rc);
     }
     answer = ChitAnswer(answer, pid, s->submit_cookie, s->holder);
     kfree(s->op);
     kfree(s->carry);
+    kfree(s->lay);
 
 #ifdef CONFIG_VOLUME_TESTS
     if (s->stand) {
@@ -512,6 +544,65 @@ int SettleCarried(TagFSVolume *to, const uint64_t *ids, uint32_t count, bool mov
     error_t rc   = CarryBegin(c);
     if (rc != OK) {
         s->carry = NULL;
+        kfree(call);
+        SettleOpAnswered(&s->w, rc);
+    }
+    return ERR_WOULD_BLOCK;
+}
+
+/* A laying's end: the parked program answered, or the kernel caller told. */
+static void SettleLayEnded(VolumeLaying* l)
+{
+    LayCall* call = container_of(l, LayCall, laying);
+    if (call->parked)
+        SettleOpAnswered(&call->parked->w, l->rc);
+    else
+        __atomic_store_n(&call->ended, 1u, __ATOMIC_RELEASE);
+}
+
+int SettleVolumeLaid(uint8_t seat, uint32_t seating, uint16_t entry, const uint8_t *name, uint32_t len,
+                     const OpContext *ctx, Crate *crates, Crate *out)
+{
+    if (len > TALLY_VOLUME_NAME_MOST || (out && out->capacity < 8u))
+        return len > TALLY_VOLUME_NAME_MOST ? ERR_INVALID_ARGUMENT : ERR_BUFFER_TOO_SMALL;
+    LayCall* call = kmalloc(sizeof(LayCall));
+    if (!call)
+        return ERR_NO_MEMORY;
+    memset(call, 0, sizeof(LayCall));
+    VolumeLaying* l = &call->laying;
+    l->seat     = seat;
+    l->seating  = seating;
+    l->entry    = entry;
+    l->name_len = len;
+    memcpy(l->name, name, len);
+    l->ended    = SettleLayEnded;
+
+    /* A caller in the kernel has no program to park: it turns the service
+     * points itself until the laying is over. */
+    if (!ctx || !ctx->proc) {
+        error_t rc = VolumeLayBegin(l);
+        while (rc == OK && !__atomic_load_n(&call->ended, __ATOMIC_ACQUIRE)) {
+            TagFSServiceIfPending();
+            cpu_pause();
+        }
+        if (rc == OK) {
+            SettleLaySay(call, out, NULL);
+            rc = l->rc;
+        }
+        kfree(call);
+        return rc;
+    }
+    SettleOpWait* s = SettleOpPark(ctx, crates, SETTLE_OP_LAY, TagFSHome(), 0, "storage.volume.lay");
+    if (!s) {
+        kfree(call);
+        return ERR_NO_MEMORY;
+    }
+    s->out       = out;
+    s->lay       = call;
+    call->parked = s;
+    error_t rc   = VolumeLayBegin(l);
+    if (rc != OK) {
+        s->lay = NULL;
         kfree(call);
         SettleOpAnswered(&s->w, rc);
     }

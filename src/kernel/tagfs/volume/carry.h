@@ -3,6 +3,7 @@
 
 #include "../tagfs.h"
 #include "../settle/settle.h"
+#include "../helm/helm.h"
 
 /*
  * Carry — a file taken from one volume of the house to another whole: its
@@ -38,6 +39,13 @@
  * nobody there: its words are left behind, counted (Carry.dropped) and said.
  * A file the system keeps (a role, TAGFS_FILE_ROLE_*) is laid by a volume's
  * maker and carried by no call: ERR_PERMISSION_DENIED.
+ *
+ * ‼ BUT THE MAKER'S OWN (Carry.maker). A volume the kernel lays
+ * (volume_lay.h) is given the files the system keeps by a carry of its maker:
+ * each kept on `to` in the role it had, its tail in its last block — the
+ * loader reads such a file by its blocks — and the kernel's file gathered into
+ * one run first, the one the Deed's BOOT can name; both while the copy is
+ * still arriving, and so nobody's but the carry's.
  *
  * Holes are laid as the zeros they read as, as a span lays them.
  */
@@ -85,6 +93,7 @@ typedef enum {
     CARRY_BORN,         /* on `to`: its tags spoken there, the copy born arriving */
     CARRY_READ,         /* on `from`: the next piece read */
     CARRY_WRITE,        /* on `to`: the piece written, a window a turn */
+    CARRY_ROLE,         /* on `to`, the maker's: the kernel gathered, the tail laid, the role kept */
     CARRY_MARKS,        /* on `to`: passport, shown, arrived — kept, when it lay deleted */
     CARRY_SETTLE,       /* a move: the copy settled on `to` */
     CARRY_LEAVE,        /* a move, on `from`: the file let go, if still the one read */
@@ -98,6 +107,7 @@ struct Carry {
     CarryItem*   items;      /* in the order they go: the programs before what names them */
     uint32_t     count;
     bool         move;
+    bool         maker;      /* a volume's maker's: the files the system keeps go too, in their roles */
     InkWarrant   warrant;
     void       (*ended)(Carry* c);   /* run once with no TagFS lock held: rc, done, dropped */
 
@@ -133,6 +143,9 @@ struct Carry {
     uint32_t         tag_count;
     uint8_t*         piece;
     uint64_t         piece_len, piece_at, offset;
+    uint32_t         role;        /* the file's role (TAGFS_FILE_ROLE_*), 0 for none */
+    HelmDefragging   gather;      /* the kernel's file into one run, a window a turn */
+    uint8_t          role_step;   /* how far CARRY_ROLE has come with this file */
 };
 
 /* The carry begun: OK, and `ended` runs once it is over — every item that
