@@ -4,7 +4,9 @@
 #include "boardroom.h"
 #include "efi_boot.h"
 #include "boxos_esp.h"
+#include "boxos_crossings.h"
 #include "rtc.h"
+#include "crypto.h"
 #include "klib.h"
 
 /* Part `index` of a '/'-parted path into `out` (`room` bytes, ended). */
@@ -90,6 +92,36 @@ static error_t EspRefusal(const DiskBootAsk* a, int rc, const char* what)
     return ERR_WRITE_FAILED;
 }
 
+/* The crossings file on `v` (boxos_crossings.h) — laid with its head when
+ * there is none, or one Gangway could not keep them in: the wrong length, or
+ * not in one run. One that holds is left as it is, its crossings with it. */
+static int CrossingsLaid(FatVolume* v, bool* laid)
+{
+    FatEntry e;
+    uint64_t run, count;
+    int      rc = FatFind(v, ESP_CROSSINGS, &e);
+    *laid       = false;
+    if (rc == FAT_OK && e.size == CROSSINGS_FILE_BYTES && FatRun(v, &e, &run, &count) == FAT_OK)
+        return FAT_OK;
+    if (rc != FAT_OK && rc != FAT_NOT_FOUND)
+        return rc;
+    uint8_t* file = kmalloc(CROSSINGS_FILE_BYTES);
+    if (!file)
+        return FAT_IO;
+    memset(file, 0, CROSSINGS_FILE_BYTES);
+    CrossingsHead* h = (CrossingsHead*)file;
+    memcpy(h->magic, CROSSINGS_HEAD_MAGIC, sizeof(h->magic));
+    h->size         = sizeof(*h);
+    h->slots        = CROSSINGS_SLOTS;
+    h->slot_sectors = CROSSINGS_SLOT_SECTORS;
+    h->first_slot   = CROSSINGS_FIRST_SLOT;
+    h->crc          = KCrc32(file, sizeof(*h));
+    rc              = FatPut(v, ESP_CROSSINGS, file, CROSSINGS_FILE_BYTES, NULL);
+    kfree(file);
+    *laid = rc == FAT_OK;
+    return rc;
+}
+
 /* The ESP `part` of a disk of `block_bytes`: the loader under BoxOS's own
  * directory, and as the removable-media default when the ESP is BoxOS's own. */
 static error_t EspWritten(const DiskBootAsk* a, const DiskPart* part, uint32_t block_bytes, DiskBootSaid* said)
@@ -99,7 +131,7 @@ static error_t EspWritten(const DiskBootAsk* a, const DiskPart* part, uint32_t b
     if (!v)
         return ERR_NO_MEMORY;
     DiskFatPlaced(&place, a->seat, a->seating, part->first, part->last - part->first + 1u, block_bytes);
-    bool own = false;
+    bool own = false, laid = false;
     int  rc  = FatOpen(v, &place.medium);
     if (rc == FAT_OK) {
         FatStamp(v, rtc_get_unix64());
@@ -109,14 +141,17 @@ static error_t EspWritten(const DiskBootAsk* a, const DiskPart* part, uint32_t b
         rc = FatPut(v, ESP_LOADER, a->loader, a->loader_bytes, NULL);
     if (rc == FAT_OK && own)
         rc = FatPut(v, ESP_FALLBACK, a->loader, a->loader_bytes, NULL);
+    if (rc == FAT_OK)
+        rc = CrossingsLaid(v, &laid);
     kfree(v);
     if (rc != FAT_OK)
         return EspRefusal(a, rc, "BoxOS's loader");
     said->fallback = own;
-    kprintf("[DiskBoot] seat %u: BoxOS's loader, %u bytes, put on the ESP in entry %u as %s%s\n", a->seat,
-            a->loader_bytes, a->entry, ESP_LOADER,
+    kprintf("[DiskBoot] seat %u: BoxOS's loader, %u bytes, put on the ESP in entry %u as %s%s; its crossings %s\n",
+            a->seat, a->loader_bytes, a->entry, ESP_LOADER,
             own ? " and as the removable-media default: the ESP is BoxOS's own"
-                : " — the removable-media default left as it is: the ESP is shared");
+                : " — the removable-media default left as it is: the ESP is shared",
+            laid ? "laid as " ESP_CROSSINGS : "kept where they were");
     return OK;
 }
 

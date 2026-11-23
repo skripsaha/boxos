@@ -24,6 +24,7 @@
 #define ESP_LOADER        "EFI/BoxOS/gangway.efi"   /* the loader a boot option names */
 #define ESP_FALLBACK      "EFI/BOOT/BOOTX64.EFI"    /* the removable-media default, x64 */
 #define ESP_LOADER_KEPT   "gangway.efi"             /* the loader as a volume keeps it, in the system's role */
+#define ESP_CROSSINGS     "EFI/BoxOS/crossings"     /* how the machine started, boxos_crossings.h */
 
 /*
  * What a boot option of BoxOS's carries past its file — EFI_LOAD_OPTION's

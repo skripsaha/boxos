@@ -27,7 +27,7 @@
 #                         panel opens, says so on the wire; a start changed on
 #                         it (startup all, cores 1) is what the kernel does;
 #                         the log kept before a warm reset shown; Turn off
-#   logcheck.sh crossings every UEFI start kept in the medium's front and
+#   logcheck.sh crossings every UEFI start kept in the ESP's crossings file and
 #                         marked landed by the kernel (AHCI and legacy IDE);
 #                         two cut starts open the panel by themselves
 #   logcheck.sh scene     the brush Gangway and the display paint a scene

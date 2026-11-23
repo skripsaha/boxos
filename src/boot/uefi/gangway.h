@@ -100,11 +100,13 @@ EFI_STATUS ReadSectors(uint64_t vlba, uint32_t count_512, void *buffer);
  * (MediumWriteSlot) — EFI_WRITE_PROTECTED from a medium that refuses writes,
  * EFI_UNSUPPORTED from one whose blocks are no whole number of 512-byte
  * sectors up to 4096 bytes; and
- * whether the MBR names every partition at `end` or past it (MediumFrontFree,
- * 0 for a GPT's protective table). */
-EFI_STATUS MediumRead(uint64_t lba_512, uint32_t count_512, void *buffer);
-EFI_STATUS MediumWriteSlot(uint64_t lba_512, const void *slot);
-int        MediumFrontFree(uint64_t end);
+ * where the crossings file lies (MediumCrossings): the ESP on the volume's
+ * medium found and read through the FAT (fat.h), its EFI/BoxOS/crossings in
+ * one run, its first 512-byte sector of the medium into *base — NULL, or why
+ * there is none. */
+EFI_STATUS  MediumRead(uint64_t lba_512, uint32_t count_512, void *buffer);
+EFI_STATUS  MediumWriteSlot(uint64_t lba_512, const void *slot);
+const char *MediumCrossings(uint64_t *base);
 
 /*
  * gangway_deed.c: what the Deed said, filled by DeedTakeUp — the FRAME its
@@ -218,7 +220,7 @@ void SettingsTake(const uint8_t *text, uint64_t bytes);
 int  SettingsList(uint32_t which);
 
 /*
- * gangway_crossings.c: the starts kept in the medium's front
+ * gangway_crossings.c: the starts kept in the ESP's crossings file
  * (boxos_crossings.h). CrossingsTake reads them, once; CrossingsMisses is how
  * many in a row from the newest did not land, CrossingsNone why none are kept
  * here (NULL when they are), CrossingsNext the number this start carries, and

@@ -1,7 +1,7 @@
 /*
  * Gangway — the crossings (boxos_crossings.h): every start this loader hands a
- * kernel over, kept in the front of the medium it started from, and whether
- * the kernel marked it landed.
+ * kernel over, kept in the crossings file of the ESP on the volume's medium,
+ * and whether the kernel marked it landed.
  *
  * Read once, before the panel is decided on (CrossingsTake): the crossings
  * that check out, newest first, the number the next carries, the slot after
@@ -11,10 +11,9 @@
  * there never crossed, and is no miss. The kernel is told where it lies and
  * its number by a Boarding Pass stamp (CrossingStamp, gangway_handoff.c).
  *
- * Nothing is written to a medium whose front a partition reaches into, or
- * whose table is a GPT's, or whose front carries no head the tool that made
- * it laid, or that refuses writes: each is said, and the start goes on with no
- * crossing kept.
+ * Nothing is written to a medium with no ESP carrying the file in one run
+ * (MediumCrossings), or whose file carries no head a BoxOS tool laid, or that
+ * refuses writes: each is said, and the start goes on with no crossing kept.
  */
 
 #include "gangway.h"
@@ -25,8 +24,8 @@ _Static_assert(GANGWAY_SET_SCREEN == CROSSING_ASKED_SCREEN && GANGWAY_SET_STARTU
                "a crossing keeps what was asked by the bits Gangway keeps it by");
 
 /* The head and every slot, read at once. */
-#define FRONT_SECTORS (CROSSINGS_END_SECTOR - CROSSINGS_HEAD_SECTOR)
-#define FRONT_PAGES   (FRONT_SECTORS * 512u / 4096u)
+#define FRONT_SECTORS (CROSSINGS_FILE_BYTES / 512u)
+#define FRONT_PAGES   (CROSSINGS_FILE_BYTES / 4096u)
 
 typedef struct {
     const char *none;                    /* why no crossings are kept here, or NULL */
@@ -35,6 +34,7 @@ typedef struct {
     uint32_t    slot_next;               /* the slot this start's goes into */
     uint64_t    number_next;
     uint32_t    misses;                  /* in a row from the newest, not landed */
+    uint64_t    base;                    /* the file's first sector of the medium */
     uint64_t    sector;                  /* where this start's was written — */
     int         written;                 /* — when it was */
 } Crossings;
@@ -135,16 +135,16 @@ void CrossingsTake(void)
 
     MemZero(g, sizeof(*g));
     g->number_next = 1;
-    if (!MediumFrontFree(CROSSINGS_FRONT_END)) {
-        g->none = "its partition table is a GPT's, or a partition begins in its first mebibyte";
+    if ((g->none = MediumCrossings(&g->base)) != NULL) {
+        /* said below */
     } else if (EFI_ERROR(g_bs->allocate_pages(AllocateAnyPages, EfiLoaderData, FRONT_PAGES, &at))) {
         g->none = "the loader has no room to read them";
     } else {
         const uint8_t *front = (const uint8_t *)(uintptr_t)at;
-        if (EFI_ERROR(MediumRead(CROSSINGS_HEAD_SECTOR, FRONT_SECTORS, (void *)front)))
-            g->none = "the medium would not read its front";
+        if (EFI_ERROR(MediumRead(g->base, FRONT_SECTORS, (void *)front)))
+            g->none = "the medium would not read the crossings file";
         else if (!HeadSound((const CrossingsHead *)front))
-            g->none = "its front carries no head — no BoxOS tool laid the crossings there";
+            g->none = "the crossings file carries no head — no BoxOS tool laid it";
         else
             Read(g, front);
         g_bs->free_pages(at, FRONT_PAGES);
@@ -207,7 +207,7 @@ void CrossingKeep(uint8_t panel, const FbInfo *fb)
     x->misses        = g->misses;
     x->crc           = Crc32(slot, sizeof(*x));
 
-    uint64_t   sector = CROSSINGS_FIRST_SLOT + (uint64_t)g->slot_next * CROSSINGS_SLOT_SECTORS;
+    uint64_t   sector = g->base + CROSSINGS_FIRST_SLOT + (uint64_t)g->slot_next * CROSSINGS_SLOT_SECTORS;
     EFI_STATUS status = MediumWriteSlot(sector, slot);
     if (EFI_ERROR(status)) {
         Print("Gangway: crossing ");

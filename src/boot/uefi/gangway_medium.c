@@ -8,6 +8,7 @@
 #include "gangway.h"
 #include "boxos_disks.h"
 #include "boxos_esp.h"
+#include "fat.h"
 
 /* =========================================================================
  * Block IO: read sectors from disk
@@ -180,6 +181,56 @@ static int DeedAsked(const uint8_t *deed)
     return !g_asked || MemEqual(((const VolumeDeed *)deed)->uuid, g_asked_uuid, 16);
 }
 
+/* The GPT of `bio`: its entry array, held to the header's checksum and the
+ * array's — a header that passes its own sum can still point at an array a
+ * write cut short — into *array, how many entries and how long each. 0 for no
+ * GPT that holds. */
+static int GptArrayRead(EFI_BLOCK_IO_PROTOCOL *bio, const uint8_t **out, uint32_t *count, uint32_t *bytes)
+{
+    const uint32_t bsz = MediumBlockBytes(bio);
+    if (bsz == 0) return 0;
+    const uint64_t ratio = bsz / 512u;
+    static uint8_t header[4096];
+    if (EFI_ERROR(ReadMediumSectors(bio, GPT_HEADER_LBA * ratio, (uint32_t)ratio, header))) return 0;
+
+    const char sig[8] = { 'E','F','I',' ','P','A','R','T' };
+    for (int i = 0; i < 8; i++)
+        if (header[i] != (uint8_t)sig[i]) return 0;
+
+    uint32_t header_bytes = Le32(header + GPT_HEADER_SIZE_OFFSET);
+    if (header_bytes < GPT_HEADER_MIN_BYTES || header_bytes > bsz) return 0;
+
+    static uint8_t hprobe[4096];
+    MemCopy(hprobe, header, header_bytes);
+    MemZero(hprobe + GPT_HEADER_CRC_OFFSET, 4);
+    if (Crc32(hprobe, header_bytes) != Le32(header + GPT_HEADER_CRC_OFFSET)) {
+        Print("Gangway: this disk's GPT header fails its own checksum\r\n");
+        return 0;
+    }
+
+    uint64_t entry_lba   = Le64(header + GPT_ENTRY_LBA_OFFSET) * ratio;
+    uint32_t entry_count = Le32(header + GPT_ENTRY_COUNT_OFFSET);
+    uint32_t entry_bytes = Le32(header + GPT_ENTRY_BYTES_OFFSET);
+    if (entry_bytes < GPT_ENTRY_MIN_BYTES || entry_count == 0 ||
+        entry_bytes > GPT_ARRAY_MAX_BYTES ||
+        entry_count > GPT_ARRAY_MAX_BYTES / entry_bytes) return 0;
+
+    uint32_t array_bytes = entry_count * entry_bytes;
+    static uint8_t array[GPT_ARRAY_MAX_BYTES];
+    uint32_t array_secs = (array_bytes + 511) / 512;
+    if (EFI_ERROR(ReadMediumSectors(bio, entry_lba, array_secs, array))) return 0;
+
+    if (Crc32(array, array_bytes) != Le32(header + GPT_ENTRY_CRC_OFFSET)) {
+        Print("Gangway: this disk's GPT entries fail their own checksum\r\n");
+        return 0;
+    }
+
+    *out   = array;
+    *count = entry_count;
+    *bytes = entry_bytes;
+    return 1;
+}
+
 static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
                         uint64_t *out_start, uint64_t *out_sectors)
 {
@@ -222,42 +273,9 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
         return 0;
     }
 
-    /* GPT. Both checksums, because a header that passes its own sum can still
-     * point at an entry array that was interrupted mid-write. */
-    static uint8_t header[4096];
-    if (EFI_ERROR(ReadMediumSectors(bio, GPT_HEADER_LBA * ratio, (uint32_t)ratio, header))) return 0;
-
-    const char sig[8] = { 'E','F','I',' ','P','A','R','T' };
-    for (int i = 0; i < 8; i++)
-        if (header[i] != (uint8_t)sig[i]) return 0;
-
-    uint32_t header_bytes = Le32(header + GPT_HEADER_SIZE_OFFSET);
-    if (header_bytes < GPT_HEADER_MIN_BYTES || header_bytes > bsz) return 0;
-
-    static uint8_t hprobe[4096];
-    MemCopy(hprobe, header, header_bytes);
-    MemZero(hprobe + GPT_HEADER_CRC_OFFSET, 4);
-    if (Crc32(hprobe, header_bytes) != Le32(header + GPT_HEADER_CRC_OFFSET)) {
-        Print("Gangway: this disk's GPT header fails its own checksum\r\n");
-        return 0;
-    }
-
-    uint64_t entry_lba   = Le64(header + GPT_ENTRY_LBA_OFFSET) * ratio;
-    uint32_t entry_count = Le32(header + GPT_ENTRY_COUNT_OFFSET);
-    uint32_t entry_bytes = Le32(header + GPT_ENTRY_BYTES_OFFSET);
-    if (entry_bytes < GPT_ENTRY_MIN_BYTES || entry_count == 0 ||
-        entry_bytes > GPT_ARRAY_MAX_BYTES ||
-        entry_count > GPT_ARRAY_MAX_BYTES / entry_bytes) return 0;
-
-    uint32_t array_bytes = entry_count * entry_bytes;
-    static uint8_t array[GPT_ARRAY_MAX_BYTES];
-    uint32_t array_secs = (array_bytes + 511) / 512;
-    if (EFI_ERROR(ReadMediumSectors(bio, entry_lba, array_secs, array))) return 0;
-
-    if (Crc32(array, array_bytes) != Le32(header + GPT_ENTRY_CRC_OFFSET)) {
-        Print("Gangway: this disk's GPT entries fail their own checksum\r\n");
-        return 0;
-    }
+    const uint8_t *array;
+    uint32_t       entry_count, entry_bytes;
+    if (!GptArrayRead(bio, &array, &entry_count, &entry_bytes)) return 0;
 
     for (uint32_t i = 0; i < entry_count; i++) {
         const uint8_t *e = array + (uint64_t)i * entry_bytes;
@@ -514,20 +532,77 @@ EFI_STATUS MediumWriteSlot(uint64_t lba_512, const void *slot)
     return st == EFI_UNSUPPORTED ? EFI_SUCCESS : st;
 }
 
-/* The medium's MBR read, and every partition it names begins at `end` or past
- * it: 1. A GPT's protective entry is a table this loader does not answer for
- * the front of — its entries lie at sectors 2 to 33 — and is 0. */
-int MediumFrontFree(uint64_t end)
-{
-    static uint8_t mbr[512] __attribute__((aligned(4096)));
+/* A FAT on a run of the medium's blocks, read by the loader and never
+ * written: a crossing's slot is written where it lies (MediumWriteSlot). */
+typedef struct {
+    EFI_BLOCK_IO_PROTOCOL *bio;
+    uint64_t               first;      /* the run's first 512-byte sector */
+    uint32_t               ratio;      /* 512-byte sectors a block is */
+} EspPlace;
 
-    const uint32_t bsz = g_block_io ? MediumBlockBytes(g_block_io) : 0;
-    if (bsz == 0 || EFI_ERROR(MediumRead(0, 1, mbr)) || mbr[510] != 0x55 || mbr[511] != 0xAA) return 0;
+static int EspRead(void *ctx, uint64_t sector, uint32_t count, void *into)
+{
+    const EspPlace *p = ctx;
+    return EFI_ERROR(ReadMediumSectors(p->bio, p->first + sector * p->ratio, count * p->ratio, into)) ? -1 : 0;
+}
+
+static int EspWrite(void *ctx, uint64_t sector, uint32_t count, const void *from)
+{
+    (void)ctx; (void)sector; (void)count; (void)from;
+    return -1;
+}
+
+static int EspFlush(void *ctx)
+{
+    (void)ctx;
+    return 0;
+}
+
+/* The crossings file in the ESP at `first` (512-byte sectors), `blocks` of
+ * the medium's long: its first sector of the medium into *base. 0 for none in
+ * one run as long as the crossings take. */
+static int CrossingsIn(uint64_t first, uint64_t blocks, uint64_t *base)
+{
+    static FatVolume v __attribute__((aligned(4096)));
+    const uint32_t   bsz   = MediumBlockBytes(g_block_io);
+    EspPlace         place = { g_block_io, first, bsz / 512u };
+    FatMedium        m     = { EspRead, EspWrite, EspFlush, &place, bsz, blocks };
+    FatEntry         e;
+    uint64_t         run, count;
+    if (FatOpen(&v, &m) != FAT_OK || FatFind(&v, ESP_CROSSINGS, &e) != FAT_OK ||
+        FatRun(&v, &e, &run, &count) != FAT_OK || count * bsz < CROSSINGS_FILE_BYTES)
+        return 0;
+    *base = first + run * place.ratio;
+    return 1;
+}
+
+const char *MediumCrossings(uint64_t *base)
+{
+    static const uint8_t esp_type[16] = DISK_TYPE_ESP;
+    static uint8_t       mbr[512] __attribute__((aligned(4096)));
+    const uint32_t       bsz = g_block_io ? MediumBlockBytes(g_block_io) : 0;
+    if (bsz == 0 || EFI_ERROR(MediumRead(0, 1, mbr)) || mbr[510] != 0x55 || mbr[511] != 0xAA)
+        return "the volume's medium carries no partition table";
+    const uint64_t ratio      = bsz / 512u;
+    int            protective = 0, esps = 0;
     for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
         const uint8_t *e = mbr + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
-        if (e[MBR_ENTRY_TYPE] == 0) continue;
-        if (e[MBR_ENTRY_TYPE] == MBR_TYPE_PROTECTIVE ||
-            (uint64_t)Le32(e + MBR_ENTRY_START_LBA) * (bsz / 512u) < end) return 0;
+        protective |= e[MBR_ENTRY_TYPE] == MBR_TYPE_PROTECTIVE;
+        if (e[MBR_ENTRY_TYPE] != 0xEF) continue;
+        esps++;
+        if (CrossingsIn(Le32(e + MBR_ENTRY_START_LBA) * ratio, Le32(e + MBR_ENTRY_SECTORS), base)) return NULL;
     }
-    return 1;
+    const uint8_t *array;
+    uint32_t       count, bytes;
+    if (protective && GptArrayRead(g_block_io, &array, &count, &bytes)) {
+        for (uint32_t i = 0; i < count; i++) {
+            const uint8_t *e = array + (uint64_t)i * bytes;
+            if (!MemEqual(e + GPT_ENTRY_TYPE_OFFSET, esp_type, 16)) continue;
+            uint64_t first = Le64(e + GPT_ENTRY_FIRST_OFFSET), last = Le64(e + GPT_ENTRY_LAST_OFFSET);
+            esps++;
+            if (last >= first && CrossingsIn(first * ratio, last - first + 1u, base)) return NULL;
+        }
+    }
+    return esps ? "no ESP of the volume's medium carries " ESP_CROSSINGS " in one run"
+                : "the volume's medium carries no ESP";
 }

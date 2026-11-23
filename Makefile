@@ -96,9 +96,9 @@ KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tab
 #
 #   sector 0            stage1, and the partition table inside it
 #   sectors 1..16       stage2
-#   sectors 128..391    the crossings (tools/crossings.py lay)
 #   sector 2048         the ESP — as long as the loader it carries needs,
-#                       rounded up to the grain
+#                       rounded up to the grain — Gangway, and the crossings
+#                       it keeps (EFI/BoxOS/crossings, tools/crossings.py)
 #   after the ESP       the volume's ground, as far as its CONTENT needs plus
 #                       the room a running machine works in (create_tagfs
 #                       --ground says how far, and says why)
@@ -986,7 +986,10 @@ GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_bytes.c src/boot/
                  src/boot/uefi/gangway_panel.c src/boot/uefi/gangway_panel_look.c \
                  src/boot/uefi/gangway_panel_log.c \
                  src/boot/uefi/gangway_crossings.c src/boot/uefi/gangway_scene.c
-GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h src/include/boxos_esp.h \
+# The one FAT32 of every side (src/lib/fat/fat.c): Gangway finds the crossings
+# on its ESP by it. Built with BOXOS_UEFI, the loader's own types.
+GANGWAY_LIB    = src/lib/fat/fat.c
+GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h src/include/boxos_esp.h src/include/fat.h \
                  src/boot/uefi/gangway_lectern.h src/boot/uefi/gangway_lectern_book.h \
                  src/include/boot_info.h src/include/boarding_pass.h \
                  src/include/volume_deed.h src/include/volume_book.h \
@@ -1015,13 +1018,14 @@ EspName        = $(shell sed -n 's/^\#define $(1)  *"\([^"]*\)".*/\1/p' $(SRCDIR
 GANGWAY_KEPT   = $(BUILDDIR)/$(call EspName,ESP_LOADER_KEPT)
 GANGWAY_SO     = $(BUILDDIR)/gangway.so
 GANGWAY_OBJ    = $(patsubst src/boot/uefi/%.c,$(BUILDDIR)/%.o,$(GANGWAY_SRC))
+GANGWAY_LIB_OBJ = $(BUILDDIR)/gangway_fat.o
 GANGWAY_JUMP_OBJ = $(BUILDDIR)/gangway_jump.o
 GANGWAY_LOGO_OBJ = $(BUILDDIR)/gangway_logo.o
 
 # UEFI compile/link flags
 # gcc ELF path: compile with -fpic, link as .so, objcopy to PE32+
 UEFI_CC      = x86_64-elf-gcc
-UEFI_CFLAGS_GCC = -ffreestanding -nostdlib -nostdinc \
+UEFI_CFLAGS_GCC = -ffreestanding -nostdlib -nostdinc -DBOXOS_UEFI \
                   -mno-red-zone -mno-sse -mno-mmx -mno-avx \
                   -fpic -fshort-wchar -fno-stack-protector \
                   -Wall -Wextra -Os \
@@ -1031,7 +1035,7 @@ UEFI_CFLAGS_GCC = -ffreestanding -nostdlib -nostdinc \
 
 # clang direct-to-PE path: -fpic is invalid on MSVC target; PE handles
 # relocations natively via the .reloc section.
-UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
+UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc -DBOXOS_UEFI \
                     -mno-red-zone -mno-sse -mno-mmx -mno-avx \
                     -fshort-wchar -fno-stack-protector \
                     -Wall -Wextra -Os \
@@ -1902,7 +1906,7 @@ endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
 $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(SCENE_FILES) $(GANGWAY_KEPT) $(TAGFS_TOOL) \
-         tools/crossings.py $(SRCDIR)/include/boxos_crossings.h tools/make_mbr.py $(MEDIUM_BLOCK_MARK)
+         tools/make_mbr.py $(MEDIUM_BLOCK_MARK)
 	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) --system $(GANGWAY_KEPT) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
@@ -1919,9 +1923,7 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	echo "  Writing the partition table (the ESP, then the volume's ground)..."; \
 	python3 tools/make_mbr.py $@ --block $(MEDIUM_BLOCK) \
 	    $$START,$$GROUND,7f,boot \
-	    $(ESP_START_SECTOR),$$ESP,ef; \
-	echo "  Laying the crossings in the front (src/include/boxos_crossings.h)..."; \
-	python3 tools/crossings.py lay $@ --block $(MEDIUM_BLOCK)
+	    $(ESP_START_SECTOR),$$ESP,ef
 	@echo "  Making the volume on it..."
 	@$(TAGFS_TOOL) --block $(MEDIUM_BLOCK) --kernel $(KERNEL_BIN) --system $(GANGWAY_KEPT) $@ $(VOLUME_LAID)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
@@ -2003,13 +2005,13 @@ $(GANGWAY_LOGO_OBJ): $(GANGWAY_LOGO) $(GANGWAY_LOGO_SCENES) | $(BUILDDIR)
 	@$(ASM) -f elf64 -DLOGO_DARK='"$(word 1,$(GANGWAY_LOGO_SCENES))"' \
 		-DLOGO_LIGHT='"$(word 2,$(GANGWAY_LOGO_SCENES))"' $< -o $@
 
-$(GANGWAY_EFI): $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ) $(GANGWAY_LD) $(GANGWAY_HDRS) | $(BUILDDIR)
+$(GANGWAY_EFI): $(GANGWAY_SRC) $(GANGWAY_LIB) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ) $(GANGWAY_LD) $(GANGWAY_HDRS) | $(BUILDDIR)
 	@echo "Building Gangway UEFI (clang/lld → PE32+)..."
 	@clang $(UEFI_CFLAGS_CLANG) \
 		-Wl,-entry:GangwayMain \
 		-Wl,-subsystem:efi_application \
 		-Wl,-nodefaultlib \
-		-o $@ $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ)
+		-o $@ $(GANGWAY_SRC) $(GANGWAY_LIB) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ)
 	@echo "Gangway EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 else
@@ -2027,12 +2029,16 @@ $(GANGWAY_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(GANGWAY_HDRS) | $(BUILDDIR)
 	@echo "Building Gangway UEFI object $@ (gcc ELF)..."
 	@$(UEFI_CC) $(UEFI_CFLAGS_GCC) -c $< -o $@
 
+$(GANGWAY_LIB_OBJ): $(GANGWAY_LIB) $(GANGWAY_HDRS) | $(BUILDDIR)
+	@echo "Building Gangway UEFI object $@ (gcc ELF)..."
+	@$(UEFI_CC) $(UEFI_CFLAGS_GCC) -c $< -o $@
+
 # ‼ -z defs: no symbol of the loader is left for anyone to resolve at load. It
 # has no loader under it and links no library, so a call the compiler made up
 # on its own — a memcpy for a struct copied, a memset for a loop it saw
 # through — is a symbol nothing will ever define, and an EFI image that calls
 # address 0 the first time that path runs. The link refuses it here instead.
-$(GANGWAY_SO): $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ) $(GANGWAY_LD) | $(BUILDDIR)
+$(GANGWAY_SO): $(GANGWAY_OBJ) $(GANGWAY_LIB_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ) $(GANGWAY_LD) | $(BUILDDIR)
 	@echo "Linking Gangway ELF shared object..."
 	@$(LD) \
 		-nostdlib \
@@ -2040,7 +2046,7 @@ $(GANGWAY_SO): $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ) $(GANGWAY_
 		-Bsymbolic \
 		-z defs \
 		-T $(GANGWAY_LD) \
-		-o $@ $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ)
+		-o $@ $(GANGWAY_OBJ) $(GANGWAY_LIB_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ)
 
 $(GANGWAY_EFI): $(GANGWAY_SO) | $(BUILDDIR)
 	@echo "Converting Gangway ELF → PE32+ EFI binary (make_efi.py)..."
@@ -2284,14 +2290,17 @@ $(BUILDDIR)/edk2-vars.fd: | $(BUILDDIR)
 ESP_FAT = $(FAT_TOOL) --sector $(MEDIUM_BLOCK) --time 315532800
 $(GANGWAY_KEPT): $(GANGWAY_EFI)
 	@cp $< $@
-$(UEFI_ESP_IMG): $(GANGWAY_EFI) $(MEDIUM_BLOCK_MARK) $(FAT_TOOL) $(SRCDIR)/include/boxos_esp.h | $(BUILDDIR)
+$(UEFI_ESP_IMG): $(GANGWAY_EFI) $(MEDIUM_BLOCK_MARK) $(FAT_TOOL) $(SRCDIR)/include/boxos_esp.h \
+                 tools/crossings.py $(SRCDIR)/include/boxos_crossings.h | $(BUILDDIR)
 	@echo "Creating UEFI ESP image (FAT32 of $(MEDIUM_BLOCK)-byte sectors) for sector $(ESP_START_SECTOR)..."
 	@rm -f $@ $@.nsh
 	@printf '@echo -off\r\n\\%s\r\n' "$$(echo '$(call EspName,ESP_FALLBACK)' | tr '/' '\\')" > $@.nsh
 	@$(ESP_FAT) --hidden $$(( $(ESP_START_SECTOR) / $(MEDIUM_PER) )) $@ lay least --label "BOXOS ESP" --id 0xB0320033 >/dev/null
 	@$(ESP_FAT) $@ put $(call EspName,ESP_FALLBACK) $(GANGWAY_EFI)
 	@$(ESP_FAT) $@ put startup.nsh $@.nsh
-	@rm -f $@.nsh
+	@python3 tools/crossings.py file $@.crossings
+	@$(ESP_FAT) $@ put $(call EspName,ESP_CROSSINGS) $@.crossings
+	@rm -f $@.nsh $@.crossings
 
 # The two run-bg keys, refused here before anything is built: an interactive
 # run would boot build/boxos.img unrecorded and let the key pass unheard.

@@ -3,16 +3,21 @@
 
 /*
  * boxos_crossings.h — the crossings: every start Gangway hands a kernel over,
- * kept on the medium it started from, and whether it landed.
+ * kept beside the volume it started, and whether it landed.
  *
- * They live in the front of the medium, in the first mebibyte BoxOS's layout
- * leaves empty past stage2 (the Makefile, "Bootloader layout"): a head 64 KiB
- * in, then CROSSINGS_SLOTS slots of 4 KiB — each 4 KiB-aligned, so a medium of
- * 4096-byte sectors writes a slot as one of its own and nothing beside it.
+ * They live in a file of the ESP on the volume's disk, BoxOS's own
+ * (boxos_esp.h ESP_CROSSINGS) — on a disk shared with another system as on a
+ * stick, the one rule for both: no sector of a disk outside a partition is
+ * BoxOS's to write. The file is CROSSINGS_FILE_BYTES in one run of clusters —
+ * a head, then CROSSINGS_SLOTS slots of 4 KiB, each 4 KiB into it, so a medium
+ * of 4096-byte sectors writes a slot as one of its own and nothing beside it
+ * — and Gangway, which finds it through the FAT (fat.h), writes a slot where
+ * it lies, never the FAT: the file's length and its clusters do not change.
  * Not the volume's: the book is the person's, and how the machine started is
- * the machine's. The tool that makes the medium lays the head
- * (tools/crossings.py lay); a medium whose front carries none is not written
- * — not a stranger's disk, not zeros, not a front laid out by anyone else.
+ * the machine's. The tool that makes a medium lays the file
+ * (tools/crossings.py file), and so does a volume's maker making BoxOS start
+ * from a disk (boardroom/disk_boot.c); an ESP that carries none is not
+ * written — not a stranger's, not one laid out by anyone else.
  *
  * A crossing is written whole into its slot, its own CRC (ISO 3309, Gangway's
  * Crc32 and the kernel's KCrc32) over it: one that does not check out — a
@@ -28,15 +33,12 @@
  * including this header.
  */
 
-#define CROSSINGS_HEAD_SECTOR   128u    /* 64 KiB into the medium, 512-byte sectors */
 #define CROSSINGS_SLOT_SECTORS  8u
 #define CROSSINGS_SLOT_BYTES    4096u
 #define CROSSINGS_SLOTS         32u
-#define CROSSINGS_FIRST_SLOT    (CROSSINGS_HEAD_SECTOR + CROSSINGS_SLOT_SECTORS)
-#define CROSSINGS_END_SECTOR    (CROSSINGS_FIRST_SLOT + CROSSINGS_SLOTS * CROSSINGS_SLOT_SECTORS)
-/* The first sector a partition of the medium may begin at: none may lie over
- * the crossings, and BoxOS's own begin at the first mebibyte. */
-#define CROSSINGS_FRONT_END     2048u
+/* The first slot, in 512-byte sectors from the file's start: past the head's. */
+#define CROSSINGS_FIRST_SLOT    CROSSINGS_SLOT_SECTORS
+#define CROSSINGS_FILE_BYTES    ((1u + CROSSINGS_SLOTS) * CROSSINGS_SLOT_BYTES)
 
 #define CROSSINGS_MISSES_PANEL  2u
 
@@ -44,8 +46,6 @@
 #define CROSSING_MAGIC          "CROSSING"
 
 _Static_assert(CROSSINGS_SLOT_SECTORS * 512u == CROSSINGS_SLOT_BYTES, "a slot is 4 KiB");
-_Static_assert(CROSSINGS_HEAD_SECTOR % CROSSINGS_SLOT_SECTORS == 0, "slots lie on 4 KiB");
-_Static_assert(CROSSINGS_END_SECTOR <= CROSSINGS_FRONT_END, "the crossings stay in the front");
 
 typedef struct __attribute__((packed)) {
     char     magic[8];       /* CROSSINGS_HEAD_MAGIC */
@@ -53,7 +53,7 @@ typedef struct __attribute__((packed)) {
     uint32_t crc;            /* over the head, this field zero */
     uint32_t slots;          /* CROSSINGS_SLOTS */
     uint32_t slot_sectors;   /* CROSSINGS_SLOT_SECTORS */
-    uint64_t first_slot;     /* CROSSINGS_FIRST_SLOT */
+    uint64_t first_slot;     /* CROSSINGS_FIRST_SLOT, from the file's start */
 } CrossingsHead;
 
 _Static_assert(sizeof(CrossingsHead) == 32, "the head is 32 bytes");

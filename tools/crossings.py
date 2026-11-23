@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
-"""crossings.py — the crossings kept in the front of a BoxOS medium
-(src/include/boxos_crossings.h): every start Gangway handed a kernel over, and
-whether it landed.
+"""crossings.py — the crossings a BoxOS medium keeps in its ESP's
+EFI/BoxOS/crossings (src/include/boxos_crossings.h, boxos_esp.h): every start
+Gangway handed a kernel over, and whether it landed.
 
-  crossings.py lay IMAGE    lay the head the crossings are kept under, every
-                            slot empty — what the tool that makes a medium
-                            does once its partition table is written
+  crossings.py file OUT     the file the crossings are kept in — its head and
+                            every slot empty — into OUT, for the ESP the tool
+                            that makes a medium lays
   crossings.py read IMAGE   the head, and every crossing that checks out,
-                            newest first, a line each; exit 1 when the front
-                            carries no head
+                            newest first, a line each, the file found in the
+                            image's ESP by build/fat; exit 1 when it carries
+                            none, or its head does not hold
 
 --block N: the block the image's medium is addressed in (4096 for a 4Kn
-medium, 512 by default) — its partition table counts in it.
+medium, 512 by default) — its partition table and its ESP count in it.
 
-The numbers of the layout are read out of boxos_crossings.h, and the two
-records are held to the sizes it asserts, so nothing here is a second copy of
-what the loader and the kernel read.
+The numbers of the layout are read out of boxos_crossings.h and boxos_esp.h,
+and the two records are held to the sizes it asserts, so nothing here is a
+second copy of what the loader and the kernel read.
 """
 
 import os
 import re
 import struct
 import sys
+import subprocess
 import zlib
 
-HEADER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "include", "boxos_crossings.h")
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+HEADER = os.path.join(ROOT, "src", "include", "boxos_crossings.h")
+ESP_HEADER = os.path.join(ROOT, "src", "include", "boxos_esp.h")
+FAT = os.path.join(ROOT, "build", "fat")
+ESP_TYPE = bytes.fromhex("28732ac11ff8d211ba4b00a0c93ec93b")   # c12a7328-f81f-11d2-ba4b-00a0c93ec93b, as on the medium
 
 HEAD = struct.Struct("<8sIIIIQ")
 CROSSING = struct.Struct("<8sIIQ16sH10B7IB15s")
@@ -57,50 +63,63 @@ def sound(raw, packer, magic):
     return zlib.crc32(raw[:12] + b"\0\0\0\0" + raw[16:packer.size]) & 0xFFFFFFFF == crc
 
 
-def front_free(medium, end, block):
-    """The MBR names every partition at `end` or past it, and is no GPT's —
-    its entries in the medium's blocks of `block` bytes."""
+def esp_path():
+    return re.search(r'#define\s+ESP_CROSSINGS\s+"([^"]+)"', open(ESP_HEADER).read()).group(1)
+
+
+def esp_first(medium, block):
+    """The first block of the image's ESP — the MBR's entry of type 0xEF, or
+    the GPT's of the ESP's type — or None."""
     medium.seek(0)
     mbr = medium.read(512)
     if len(mbr) < 512 or mbr[510:512] != b"\x55\xaa":
-        return "it carries no MBR"
-    for i in range(4):
-        entry = mbr[446 + 16 * i: 462 + 16 * i]
-        kind, start = entry[4], struct.unpack_from("<I", entry, 8)[0] * (block // 512)
-        if kind == 0xEE:
-            return "its partition table is a GPT's"
-        if kind and start < end:
-            return f"partition {i + 1} begins at sector {start}, inside the front"
+        return None
+    kinds = [(mbr[446 + 16 * i + 4], struct.unpack_from("<I", mbr, 446 + 16 * i + 8)[0]) for i in range(4)]
+    if not any(k == 0xEE for k, _ in kinds):
+        return next((start for k, start in kinds if k == 0xEF), None)
+    medium.seek(block)
+    head = medium.read(92)
+    if head[:8] != b"EFI PART":
+        return None
+    entries, count, size = struct.unpack_from("<QII", head, 72)
+    medium.seek(entries * block)
+    array = medium.read(count * size)
+    for i in range(count):
+        e = array[i * size:(i + 1) * size]
+        if e[:16] == ESP_TYPE:
+            return struct.unpack_from("<Q", e, 32)[0]
     return None
 
 
-def lay(path, n, block):
-    with open(path, "r+b") as medium:
-        why = front_free(medium, n["CROSSINGS_FRONT_END"], block)
-        if why:
-            sys.exit(f"crossings: {path}: no crossings laid — {why}")
-        head = HEAD.pack(n["CROSSINGS_HEAD_MAGIC"], HEAD.size, 0, n["CROSSINGS_SLOTS"],
-                         n["CROSSINGS_SLOT_SECTORS"], n["CROSSINGS_FIRST_SLOT"])
-        crc = zlib.crc32(head) & 0xFFFFFFFF
-        head = head[:12] + struct.pack("<I", crc) + head[16:]
-        front = head.ljust(n["CROSSINGS_SLOT_BYTES"], b"\0") + bytes(n["CROSSINGS_SLOTS"] * n["CROSSINGS_SLOT_BYTES"])
-        medium.seek(n["CROSSINGS_HEAD_SECTOR"] * 512)
-        medium.write(front)
-    print(f"crossings: laid at sector {n['CROSSINGS_HEAD_SECTOR']}, {n['CROSSINGS_SLOTS']} slots from sector "
-          f"{n['CROSSINGS_FIRST_SLOT']}")
+def file_bytes(n):
+    head = HEAD.pack(n["CROSSINGS_HEAD_MAGIC"], HEAD.size, 0, n["CROSSINGS_SLOTS"],
+                     n["CROSSINGS_SLOT_SECTORS"], n["CROSSINGS_FIRST_SLOT"])
+    crc = zlib.crc32(head) & 0xFFFFFFFF
+    head = head[:12] + struct.pack("<I", crc) + head[16:]
+    return head.ljust(n["CROSSINGS_FILE_BYTES"], b"\0")
 
 
-def read(path, n):
+def read(path, n, block):
     with open(path, "rb") as medium:
-        medium.seek(n["CROSSINGS_HEAD_SECTOR"] * 512)
-        front = medium.read((n["CROSSINGS_END_SECTOR"] - n["CROSSINGS_HEAD_SECTOR"]) * 512)
+        first = esp_first(medium, block)
+        if first is None:
+            print(f"crossings: {path}: it carries no ESP")
+            return 1
+        run = subprocess.run([FAT, "--sector", str(block), "--at", str(first), path, "run", esp_path()],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        if run.returncode != 0:
+            print(f"crossings: {path}: its ESP carries no {esp_path()} in one run ({run.stderr.strip()})")
+            return 1
+        base = int(run.stdout.split()[0]) * (block // 512)
+        medium.seek(base * 512)
+        front = medium.read(n["CROSSINGS_FILE_BYTES"])
     head = front[:HEAD.size]
     if not sound(head, HEAD, n["CROSSINGS_HEAD_MAGIC"]):
-        print(f"crossings: {path}: its front carries no head")
+        print(f"crossings: {path}: its {esp_path()} carries no head")
         return 1
-    _, _, _, slots, slot_sectors, first = HEAD.unpack(head)
-    print(f"crossings: head at sector {n['CROSSINGS_HEAD_SECTOR']}, {slots} slots of {slot_sectors} sectors "
-          f"from sector {first}")
+    _, _, _, slots, slot_sectors, first_slot = HEAD.unpack(head)
+    print(f"crossings: head at sector {base}, {slots} slots of {slot_sectors} sectors "
+          f"from sector {base + first_slot}")
     kept = []
     for s in range(n["CROSSINGS_SLOTS"]):
         raw = front[(1 + s) * n["CROSSINGS_SLOT_BYTES"]:][:CROSSING.size]
@@ -126,13 +145,14 @@ def main(argv):
         at = argv.index("--block")
         block = int(argv[at + 1], 0)
         argv = argv[:at] + argv[at + 2:]
-    if len(argv) != 3 or argv[1] not in ("lay", "read") or block % 512 or not 512 <= block <= 4096:
+    if len(argv) != 3 or argv[1] not in ("file", "read") or block % 512 or not 512 <= block <= 4096:
         sys.exit(__doc__)
     n = layout()
-    if argv[1] == "lay":
-        lay(argv[2], n, block)
+    if argv[1] == "file":
+        with open(argv[2], "wb") as out:
+            out.write(file_bytes(n))
         return 0
-    return read(argv[2], n)
+    return read(argv[2], n, block)
 
 
 if __name__ == "__main__":

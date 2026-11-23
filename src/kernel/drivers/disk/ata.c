@@ -6,7 +6,6 @@
 #include "io.h"
 #include "cpu_calibrate.h"
 #include "kernel_config.h"
-#include "boxos_crossings.h"   /* the crossings are the one thing written in the front */
 #include "atomics.h"
 #include "pci.h"
 #include "pmm.h"
@@ -862,17 +861,6 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
 
     if (!d->exists || !ch->present) return ATA_ERR_NO_DEVICE;
 
-    /* Refuse writes to the bootloader region (sectors 0..399) — the
-     * MBR + stage2 live there; corrupting them bricks the install. The one
-     * thing written in it is a crossing's slot, marked landed
-     * (boxos_crossings.h, crossing.c). */
-    #define BOOTLOADER_PROTECTED_SECTORS 400
-    if (lba < BOOTLOADER_PROTECTED_SECTORS &&
-        !(lba >= CROSSINGS_FIRST_SLOT && lba + count <= CROSSINGS_END_SECTOR)) {
-        debug_printf("[ATA] SECURITY: write to protected LBA %lu blocked\n",
-                     (unsigned long)lba);
-        return ATA_ERR_PROTECTED_SECTOR;
-    }
     if (!ata_whole(drive_idx, lba, count)) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
     /* DMA fast path — same gate as ata_read_sectors, and the same division
@@ -1126,7 +1114,6 @@ static int ata_retry_classify(int rc) {
     return (rc == ATA_ERR_NO_DEVICE     ||
             rc == ATA_ERR_LBA_OUT_OF_BOUNDS ||
             rc == ATA_ERR_INVALID_ARGS  ||
-            rc == ATA_ERR_PROTECTED_SECTOR ||
             rc == ATA_ERR_NOT_SUPPORTED) ? 1 : 0;
 }
 

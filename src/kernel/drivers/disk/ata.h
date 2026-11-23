@@ -88,7 +88,6 @@ typedef enum {
 #define ATA_ERR_LBA_OUT_OF_BOUNDS  -3
 #define ATA_ERR_TIMEOUT            -4
 #define ATA_ERR_DRIVE_FAULT        -5
-#define ATA_ERR_PROTECTED_SECTOR   -6
 #define ATA_ERR_FLUSH_FAILED       -7
 #define ATA_ERR_MAX_RETRIES        -8
 #define ATA_ERR_NOT_SUPPORTED      -9

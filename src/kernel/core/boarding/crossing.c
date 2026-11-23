@@ -29,6 +29,7 @@
 #include "journey.h"
 #include "boxos_crossings.h"
 #include "boardroom.h"
+#include "disk_table.h"
 #include "roadstead.h"
 #include "baton.h"
 #include "tagfs.h"
@@ -154,20 +155,39 @@ static void Stood(void)
     Done(why);
 }
 
+/* Whether the slot at `sector` (512-byte sectors) of the disk in `seat` lies
+ * whole inside one of its ESPs — where the crossings file is, and the one
+ * place a crossing is written (boxos_crossings.h). The table is the one the
+ * mount read, remembered. */
+static bool CrossingInEsp(uint8_t seat, uint64_t sector)
+{
+    DiskTable t;
+    if (DiskTableRead(seat, &t) != OK)
+        return false;
+    uint64_t ratio = t.block_bytes / BOARDROOM_SECTOR_BYTES;
+    bool     in    = false;
+    for (uint32_t i = 0; i < t.part_count; i++) {
+        const DiskPart* p = &t.parts[i];
+        in |= p->kind == DISK_PART_ESP && sector >= p->first * ratio &&
+              sector + CROSSINGS_SLOT_SECTORS <= (p->last + 1u) * ratio;
+    }
+    DiskTableLetGo(&t);
+    return in;
+}
+
 void CrossingLand(void)
 {
     if (__atomic_exchange_n(&g_crossing.begun, 1u, __ATOMIC_ACQ_REL)) return;
     if (!BoardingPassCrossing(&g_crossing.sector, &g_crossing.number)) return;
     g_crossing.landed_ms = LandedMs();
 
-    if (g_crossing.sector < CROSSINGS_FIRST_SLOT || g_crossing.sector >= CROSSINGS_END_SECTOR ||
-        (g_crossing.sector - CROSSINGS_FIRST_SLOT) % CROSSINGS_SLOT_SECTORS != 0) {
-        Done("the pass names a slot outside the crossings");
-        return;
-    }
     g_crossing.seat = tagfs_get_seat(TagFSHome());
     if (!BoardroomSeatOccupied(g_crossing.seat)) {
         Done("the medium the volume stood on is gone");
+        return;
+    }
+    if (!CrossingInEsp(g_crossing.seat, g_crossing.sector)) {
+        Done("the pass names a slot outside every ESP of the volume's medium");
         return;
     }
     g_crossing.dma = pmm_alloc_zero(1, PHYS_TAG_DMA32);

@@ -1,6 +1,7 @@
 # logcheck_crossings — the crossings scenario of tools/logcheck.sh: every
-# start Gangway hands a kernel over, kept in the front of the medium
-# (src/include/boxos_crossings.h, gangway_crossings.c), marked landed by the
+# start Gangway hands a kernel over, kept in the crossings file of the ESP
+# (EFI/BoxOS/crossings, src/include/boxos_crossings.h, gangway_crossings.c,
+# found through the FAT), marked landed by the
 # kernel when the display takes the screen (src/kernel/core/boarding/
 # crossing.c), and two starts in a row that did not land opening the panel by
 # themselves. What lies on the medium is read on the host by
@@ -11,15 +12,16 @@
 # keys) is stand.sh's, stand_typer.sh's or logcheck.sh's.
 
 # ---------------------------------------------------------------------------
-# crossings: the image is laid with the crossings and keeps none. A UEFI start
-# is crossing 1, kept at sector 136, and the kernel marks it landed — the
-# front read on the host says so. Two starts are cut the moment the kernel
+# crossings: the image's ESP is laid with the crossings file and keeps none. A
+# UEFI start is crossing 1, kept in the file's first slot, and the kernel marks
+# it landed — the file read on the host says so. Two starts are cut the moment
+# the kernel
 # says which crossing it is — before any display: neither lands, the second
 # counted as the one before it missed. The fourth start opens the panel by
 # itself; Start, and it lands, two misses before it and the panel's reason in
 # it. On a legacy channel (the pc machine's IDE) the kernel marks the landing
-# standing over the medium. A medium whose front carries no head is left as it
-# is, said. The image is put back as it was after.
+# standing over the medium. A file whose head is gone, and an ESP with no
+# file, are left as they are, said. The image is put back as it was after.
 # ---------------------------------------------------------------------------
 
 crossings_read() {
@@ -65,28 +67,34 @@ crossings_cut() {
     return 0
 }
 
+# The sector of the crossings file's slot `k`, from what crossings.py read said.
+crossings_slot() {
+    echo $(( $(printf '%s\n' "$R" | sed -nE 's/^crossings: head at sector [0-9]+, [0-9]+ slots of 8 sectors from sector ([0-9]+)$/\1/p') + 8 * $1 ))
+}
+
 run_crossings() {
-    echo "== crossings: every start kept in the medium's front, landed when the display takes the screen; two misses open the panel =="
+    echo "== crossings: every start kept in the ESP's crossings file, landed when the display takes the screen; two misses open the panel =="
     build
     cp build/boxos.img "$SCRATCH/crossings.before.img"
 
-    local R L
+    local R L head s0 s4
     R=$(crossings_read)
-    printf '%s\n' "$R" | grep -q "^crossings: head at sector 128, 32 slots of 8 sectors from sector 136" &&
-        printf '%s\n' "$R" | grep -q "^crossings: 0 kept"
-    chk $? "crossings (image): the image is laid with the crossings, and keeps none"
+    head=$(printf '%s\n' "$R" | sed -nE 's/^crossings: head at sector ([0-9]+), 32 slots of 8 sectors from sector [0-9]+$/\1/p')
+    s0=$(crossings_slot 0) s4=$(crossings_slot 4)
+    [ -n "$head" ] && [ "$s0" = $((head + 8)) ] && printf '%s\n' "$R" | grep -q "^crossings: 0 kept"
+    chk $? "crossings (image): the image's ESP is laid with the crossings file, at sector ${head:-none}, and keeps none"
 
     crossings_boot first "\[Crossing\] crossing 1 "
     sleep 1
     make run-stop >/dev/null 2>&1
     L="$SCRATCH/serial.crossings.first.log"
     cp build/serial.log "$L"
-    grep -aq "Gangway: this start is crossing 1, kept at sector 136" "$L"
-    chk $? "crossings (first): Gangway keeps this start as crossing 1, at sector 136"
-    grep -aqE "\[Crossing\] crossing 1 landed [0-9]+ ms after the kernel began — kept at sector 136 of seat 0" "$L"
+    grep -aq "Gangway: this start is crossing 1, kept at sector $s0" "$L"
+    chk $? "crossings (first): Gangway keeps this start as crossing 1, in the file's first slot (sector $s0)"
+    grep -aqE "\[Crossing\] crossing 1 landed [0-9]+ ms after the kernel began — kept at sector $s0 of seat 0" "$L"
     chk $? "crossings (first): the kernel marks it landed when the display takes the screen ($(grep -a '\[Crossing\]' "$L" | tr -d '\r' | head -1 | cut -c12-70))"
     crossings_read | grep -qE "^crossing 1 slot 0 .* landed ms=[0-9]+ misses=0 panel=none kernel=held"
-    chk $? "crossings (first): and the front, read on the host, holds it landed"
+    chk $? "crossings (first): and the file, read on the host, holds it landed"
 
     crossings_cut second && crossings_cut third
     R=$(crossings_read)
@@ -118,22 +126,36 @@ run_crossings() {
     L="$SCRATCH/serial.crossings.legacy.log"
     cp build/serial.log "$L"
     grep -aq "seat 0: ATA primary master" "$L" &&
-        grep -aqE "\[Crossing\] crossing 5 landed [0-9]+ ms after the kernel began — kept at sector 168 of seat 0" "$L"
+        grep -aqE "\[Crossing\] crossing 5 landed [0-9]+ ms after the kernel began — kept at sector $s4 of seat 0" "$L"
     chk $? "crossings (legacy): on an IDE channel the kernel marks the landing standing over the medium"
 
-    local bare="$SCRATCH/crossings.bare.img"
+    local bare="$SCRATCH/crossings.bare.img" esp
     cp "$SCRATCH/crossings.before.img" "$bare"
-    dd if=/dev/zero of="$bare" bs=512 seek=128 count=8 conv=notrunc status=none
+    dd if=/dev/zero of="$bare" bs=512 seek="$head" count=8 conv=notrunc status=none
     crossings_boot bare "BoxOS Hub" BOOTDISK="$bare"
     sleep 3
     make run-stop >/dev/null 2>&1
     L="$SCRATCH/serial.crossings.bare.log"
     cp build/serial.log "$L"
-    grep -aq "Gangway: no crossings are kept on this medium — its front carries no head" "$L" &&
+    grep -aq "Gangway: no crossings are kept on this medium — the crossings file carries no head" "$L" &&
         ! grep -aqE "this start is crossing|\[Crossing\]" "$L"
-    chk $? "crossings (bare): a front with no head — none kept, said, and nothing for the kernel to mark"
-    cmp -s <(dd if="$bare" bs=512 skip=128 count=264 status=none) <(dd if=/dev/zero bs=512 count=264 status=none)
-    chk $? "crossings (bare): and not a byte of the front is written"
+    chk $? "crossings (bare): a file whose head is gone — none kept, said, and nothing for the kernel to mark"
+    cmp -s <(dd if="$bare" bs=512 skip="$head" count=264 status=none) <(dd if=/dev/zero bs=512 count=264 status=none)
+    chk $? "crossings (bare): and not a byte of the file is written"
+
+    cp "$SCRATCH/crossings.before.img" "$bare"
+    esp=$(python3 -c 'import struct, sys
+m = open(sys.argv[1], "rb").read(512)
+print(next(struct.unpack_from("<I", m, 446 + 16 * i + 8)[0] for i in range(4) if m[446 + 16 * i + 4] == 0xEF))' "$bare")
+    build/fat --at "$esp" "$bare" rm EFI/BoxOS/crossings >/dev/null &&
+        crossings_boot nofile "BoxOS Hub" BOOTDISK="$bare"
+    sleep 3
+    make run-stop >/dev/null 2>&1
+    L="$SCRATCH/serial.crossings.nofile.log"
+    cp build/serial.log "$L"
+    grep -aq "Gangway: no crossings are kept on this medium — no ESP of the volume's medium carries EFI/BoxOS/crossings in one run" "$L" &&
+        ! grep -aqE "this start is crossing|\[Crossing\]" "$L"
+    chk $? "crossings (no file): an ESP carrying no crossings file — none kept, said, and nothing for the kernel to mark"
     rm -f "$bare"
 
     cp "$SCRATCH/crossings.before.img" build/boxos.img
