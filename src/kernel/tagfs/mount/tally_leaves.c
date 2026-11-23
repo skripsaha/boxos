@@ -585,12 +585,12 @@ static error_t BookFileAside(TagFSVolume* vol, BookFile* f)
     return OK;
 }
 
-error_t BookAsideSettled(TagFSVolume* vol, bool (*taken)(uint64_t fid))
+error_t BookAsideSettled(TagFSVolume* vol, bool (*taken)(TagFSVolume* vol, uint64_t fid))
 {
     error_t rc = OK;
     for (uint32_t i = 0; i < vol->tally_leaves.naside; i++) {
         BookFile* f = &vol->tally_leaves.aside[i];
-        if (rc == OK && !taken(f->fid))
+        if (rc == OK && !taken(vol, f->fid))
             rc = BookFileLock(vol, f, "it lies in a rotten range of FILES");
         BookFileForget(f);
     }

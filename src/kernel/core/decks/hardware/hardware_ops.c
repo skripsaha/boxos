@@ -252,10 +252,11 @@ static int HwDiskInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 /* HW_DISK_FLUSH  params:[u8 is_master]
  *
  * The ABI still carries the legacy 0/1 master/slave flag, but the only durable
- * thing it can mean today is "commit the TagFS volume" — that is the device
- * any commit really cares about. tagfs_flush_cache() resolves where the volume
- * lives (AHCI port number or ATA drive index) at the storage layer, so this
- * stays correct on every (ATA, AHCI) × (boot port) combination. The parameter
+ * thing it can mean today is "commit the TagFS volumes" — every mounted
+ * volume of the house, each one's medium, which are the devices any commit
+ * really cares about; the first refusal is the answer. tagfs_flush_cache()
+ * resolves where a volume lives at the storage layer, so this stays correct
+ * on every (ATA, AHCI, USB) × (boot port) combination. The parameter
  * itself names nothing this op can act on and is read only to keep the wire
  * shape.
  *
@@ -272,7 +273,15 @@ static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count
     (void)crates; (void)crate_count; (void)ctx;
     if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
     (void)op->params[0];
-    return tagfs_flush_cache(TagFSHome());
+    error_t first = OK;
+    for (TagFSVolume* vol = TagFSVolumeNext(NULL); vol; vol = TagFSVolumeNext(vol)) {
+        if (!TagFSVolumeMounted(vol))
+            continue;
+        error_t rc = tagfs_flush_cache(vol);
+        if (rc != OK && first == OK)
+            first = rc;
+    }
+    return first;
 }
 
 

@@ -303,7 +303,7 @@ error_t BookRangeRotsLaid(TagFSVolume* vol, const TallyPlace* at, const char* wh
 error_t BookTagsRotLaid(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, const char* why);
 void    BookRangeTaken(TagFSVolume* vol, const TallyPlace* at);
 void    BookRangeBack(TagFSVolume* vol, const TallyPlace* at);
-error_t BookAsideSettled(TagFSVolume* vol, bool (*taken)(uint64_t fid));
+error_t BookAsideSettled(TagFSVolume* vol, bool (*taken)(TagFSVolume* vol, uint64_t fid));
 void    BookAsideLetGo(TagFSVolume* vol);
 error_t BookFacsimileItem(TagFSVolume* vol, uint64_t tree, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
 error_t BookFacsimileClose(TagFSVolume* vol);

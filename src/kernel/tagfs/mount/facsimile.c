@@ -376,9 +376,8 @@ static error_t FacsimileGroupWeighed(TagFSVolume* vol, const FacsimileGroup* g)
 }
 
 /* Whether a FILES range given back reaches into `fid`. */
-static bool FacsimileTakes(uint64_t fid)
+static bool FacsimileTakes(TagFSVolume* vol, uint64_t fid)
 {
-    TagFSVolume* vol = TagFSHome();
     for (uint32_t i = 0; i < vol->facsimile.nranges; i++) {
         uint64_t lo, hi;
         if (vol->facsimile.ranges[i].tree != TALLY_FILES || !vol->facsimile.ranges[i].taken)
