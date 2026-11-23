@@ -116,7 +116,7 @@ ESP_START_SECTOR     = 2048
 # ‼ THE BLOCK THE MEDIUM IS ADDRESSED IN: 512, or MEDIUM_BLOCK=4096 for an
 # image laid out for a 4Kn disk or stick. Every number of its tables counts in
 # that block — the MBR's entries (tools/make_mbr.py --block) and the ESP's FAT,
-# whose sector is the medium's (tools/make_esp.py --sector; the smallest FAT32
+# whose sector is the medium's (tools/fat.c --sector; the smallest FAT32
 # of 4096-byte sectors is some 260 MB, as on every 4Kn disk) — and the volume
 # is read back in it (volume-read --block). The shape above is in 512-byte
 # sectors either way: every grain of it is whole 4096-byte blocks. `make usb`
@@ -808,6 +808,9 @@ INSIDE_TOOL = $(BUILDDIR)/inside
 # any rule lists them among what it is made of — a prerequisite is read as the
 # rule is, and a name defined after it is no file at all there.
 PACK_TOOL   = $(BUILDDIR)/pack
+# A FAT32 laid and written on the build machine by the one code the kernel and
+# Gangway use (tools/fat.c, src/lib/fat/fat.c): the ESP of every image.
+FAT_TOOL    = $(BUILDDIR)/fat
 PACK_SHA256 = $(BUILDDIR)/pack_sha256.o
 BOOTDIR     = $(SRCDIR)/boot
 KERNELDIR   = $(SRCDIR)/kernel
@@ -1165,6 +1168,10 @@ $(PACK_TOOL): tools/pack.c tools/box_host.h $(SRCDIR)/include/box_format.h \
               $(SRCDIR)/include/settings_reader.h $(SRCDIR)/include/key_chord.h $(PACK_SHA256) | $(BUILDDIR)
 	@echo "Compiling the pack tool for $(UNAME_S) ($(UNAME_M))..."
 	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -I$(SRCDIR)/include -Itools tools/pack.c $(PACK_SHA256) -o $@
+
+$(FAT_TOOL): tools/fat.c $(SRCDIR)/lib/fat/fat.c $(SRCDIR)/include/fat.h | $(BUILDDIR)
+	@echo "Compiling the FAT tool for $(UNAME_S) ($(UNAME_M))..."
+	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -I$(SRCDIR)/include tools/fat.c $(SRCDIR)/lib/fat/fat.c -o $@
 
 # tools/inside — what a program file is made of, on the build machine: the
 # same source as the utility inside (utils/inside/inside_show.c), built with
@@ -2256,9 +2263,20 @@ $(BUILDDIR)/edk2-vars.fd: | $(BUILDDIR)
 # from it. It no longer depends on edk2-vars.fd — NVRAM belongs to running a
 # virtual machine, not to building a filesystem, and the image needs this even
 # when no OVMF is installed.
-$(UEFI_ESP_IMG): $(GANGWAY_EFI) $(MEDIUM_BLOCK_MARK) tools/make_esp.py | $(BUILDDIR)
+#
+# The smallest FAT32 there is in the medium's sector, holding Gangway where
+# firmware looks for a medium's own loader (\EFI\BOOT\BOOTX64.EFI, UEFI 2.10
+# §3.5.1) and startup.nsh, which runs it from a UEFI Shell that finds no boot
+# option. Its times and serial are fixed, so the same tree lays the same bytes.
+ESP_FAT = $(FAT_TOOL) --sector $(MEDIUM_BLOCK) --time 315532800
+$(UEFI_ESP_IMG): $(GANGWAY_EFI) $(MEDIUM_BLOCK_MARK) $(FAT_TOOL) | $(BUILDDIR)
 	@echo "Creating UEFI ESP image (FAT32 of $(MEDIUM_BLOCK)-byte sectors) for sector $(ESP_START_SECTOR)..."
-	@python3 tools/make_esp.py $(GANGWAY_EFI) $@ $$(( $(ESP_START_SECTOR) / $(MEDIUM_PER) )) --sector $(MEDIUM_BLOCK)
+	@rm -f $@ $@.nsh
+	@printf '@echo -off\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\n' > $@.nsh
+	@$(ESP_FAT) --hidden $$(( $(ESP_START_SECTOR) / $(MEDIUM_PER) )) $@ lay least --label "BOXOS ESP" --id 0xB0320033 >/dev/null
+	@$(ESP_FAT) $@ put EFI/BOOT/BOOTX64.EFI $(GANGWAY_EFI)
+	@$(ESP_FAT) $@ put startup.nsh $@.nsh
+	@rm -f $@.nsh
 
 # The two run-bg keys, refused here before anything is built: an interactive
 # run would boot build/boxos.img unrecorded and let the key pass unheard.
