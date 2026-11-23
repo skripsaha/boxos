@@ -107,21 +107,22 @@ lay_whole() {
 # no program made — each with its bytes, role, tags and passport.
 lay_holds() {
     python3 - "$1" "$2" "$3" build/boxos.img <<'EOF'
-import json, subprocess, sys
+import collections, json, subprocess, sys
 def Files(img, block):
     out = subprocess.check_output([sys.executable, "tools/volume-read.py", img, "--block", block, "check", "--json"],
                                   stderr=subprocess.DEVNULL)
-    return {f["name"]: f for f in json.loads(out)["files"] if f["visible"]}
-laid, home = Files(sys.argv[1], sys.argv[2]), Files(sys.argv[4], "512")
-want = {n for n, f in home.items() if (f["flags"] & 12 if sys.argv[3] == "roles" else not f.get("made_by"))}
+    return [f for f in json.loads(out)["files"] if f["visible"]]
 def Card(f):
-    return (f["sha256"], f["size"], f["flags"], sorted(f.get("tag_text") or []), f.get("passport"))
-differ = sorted(n for n in want & set(laid) if Card(laid[n]) != Card(home[n]))
-if set(laid) != want or differ:
-    print("laid %d, wanted %d; missing %s, beyond %s, differing %s" % (len(laid), len(want), sorted(want - set(laid))[:4],
-          sorted(set(laid) - want)[:4], differ[:4]))
+    return (f["name"], f["sha256"], f["size"], f["flags"], tuple(sorted(f.get("tag_text") or [])), f.get("passport"))
+laid, home = Files(sys.argv[1], sys.argv[2]), Files(sys.argv[4], "512")
+want = collections.Counter(Card(f) for f in home
+                           if (f["flags"] & 12 if sys.argv[3] == "roles" else not f.get("made_by")))
+got = collections.Counter(Card(f) for f in laid)
+if got != want:
+    print("laid %d, wanted %d; missing %s, beyond %s" % (sum(got.values()), sum(want.values()),
+          sorted(c[0] for c in (want - got).elements())[:4], sorted(c[0] for c in (got - want).elements())[:4]))
     sys.exit(1)
-print("%d file(s)" % len(laid))
+print("%d file(s)" % sum(got.values()))
 EOF
 }
 
