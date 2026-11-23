@@ -75,7 +75,8 @@ def ConstantsCheck(src):
     inc, fs = os.path.join(src, "include"), os.path.join(src, "kernel", "tagfs")
     paths = {"deed": os.path.join(inc, "volume_deed.h"), "pen": os.path.join(inc, "deed_pen.h"),
              "consts": os.path.join(fs, "tagfs_constants.h"),
-             "ground": os.path.join(src, "kernel", "core", "boardroom", "ground.c"),
+             "disks": os.path.join(inc, "boxos_disks.h"),
+             "table": os.path.join(src, "kernel", "core", "boardroom", "disk_table_internal.h"),
              "groundh": os.path.join(src, "kernel", "core", "boardroom", "ground.h"),
              "boardroom": os.path.join(src, "kernel", "core", "boardroom", "boardroom.h")}
     if not all(os.path.exists(p) for p in paths.values()):
@@ -104,12 +105,12 @@ def ConstantsCheck(src):
                   ("FILE_ROLE_MASK", "TAGFS_FILE_ROLE_MASK"), ("FILE_ROLE_SYSTEM", "TAGFS_FILE_ROLE_SYSTEM"),
                   ("FILE_ROLE_BOOT", "TAGFS_FILE_ROLE_BOOT"), ("FILE_ROLE_KERNEL", "TAGFS_FILE_ROLE_KERNEL"),
                   ("FILE_ARRIVING", "TAGFS_FILE_ARRIVING"),
-                  ("MBR_TYPE_BOXOS", "GROUND_MBR_TYPE"), ("MBR_TYPE_PROTECTIVE", "GROUND_MBR_TYPE_PROTECTIVE"),
+                  ("MBR_TYPE_BOXOS", "DISK_MBR_BOXOS"), ("MBR_TYPE_PROTECTIVE", "DISK_MBR_PROTECTIVE"),
                   ("GPT_ARRAY_MAX_BYTES", "GPT_ARRAY_MAX_BYTES"), ("LOGICAL_MOST", "BOARDROOM_LOGICAL_MOST"),
                   ("GROUND_MAX_PER_MEDIUM", "GROUND_MAX_PER_MEDIUM")):
         Eq(c, getattr(ondisk, py), d.get(c))
-    guid = re.search(r"g_boxos_type_guid\[16\]\s*=\s*\{(.*?)\}", text["ground"], re.S)
-    Eq("g_boxos_type_guid", ondisk.BOXOS_TYPE_GUID,
+    guid = re.search(r"#define\s+DISK_TYPE_BOXOS\s*\{(.*?)\}", text["disks"], re.S)
+    Eq("DISK_TYPE_BOXOS", ondisk.BOXOS_TYPE_GUID,
        bytes(int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]+)", guid.group(1))) if guid else None)
     structs = Structs(text["deed"], d)
     for cname, fields in (("VolumeDeed", ondisk.VOLUME_DEED), ("VolumeGeometry", ondisk.VOLUME_GEOMETRY),

@@ -124,12 +124,12 @@ FILE_LAID_BIT = 1 << 5                  # a header flag no kernel names, kept as
 # Partition tables — the ground the kernel will stand on
 # ---------------------------------------------------------------------------
 
-MBR_TYPE_BOXOS = 0x7F                   # ground.c:17 GROUND_MBR_TYPE
-MBR_TYPE_PROTECTIVE = 0xEE              # ground.c:27 GROUND_MBR_TYPE_PROTECTIVE
-GPT_ARRAY_MAX_BYTES = 128 * 1024        # ground.c:83 GPT_ARRAY_MAX_BYTES
+MBR_TYPE_BOXOS = 0x7F                   # boxos_disks.h DISK_MBR_BOXOS
+MBR_TYPE_PROTECTIVE = 0xEE              # boxos_disks.h DISK_MBR_PROTECTIVE
+GPT_ARRAY_MAX_BYTES = 128 * 1024        # disk_table_internal.h GPT_ARRAY_MAX_BYTES
 LOGICAL_MOST = 4096                     # boardroom.h BOARDROOM_LOGICAL_MOST: the largest block a medium is seated with
 GROUND_MAX_PER_MEDIUM = 8               # ground.h:42 GROUND_MAX_PER_MEDIUM
-BOXOS_TYPE_GUID = bytes([               # ground.c:19-22, gangway_medium.c — as on the medium
+BOXOS_TYPE_GUID = bytes([               # boxos_disks.h DISK_TYPE_BOXOS — as on the medium
     0x9a, 0xe4, 0x8a, 0xcf, 0x6a, 0xd2, 0x59, 0x49,
     0x9a, 0x6f, 0x71, 0xc9, 0x32, 0xe0, 0xc9, 0xeb,
 ])
