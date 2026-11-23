@@ -134,6 +134,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_book_room)) \
     VOLUME_TESTS_ONLY(SUITE(stand_errata)) \
     VOLUME_TESTS_ONLY(SUITE(stand_keep)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_carry)) \
     VOLUME_TESTS_ONLY(SUITE(stand_name)) \
     VOLUME_TESTS_ONLY(SUITE(stand_retire)) \
     VOLUME_TESTS_ONLY(SUITE(stand_show)) \

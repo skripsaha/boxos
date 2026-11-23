@@ -589,6 +589,83 @@ error_t InkKeep(TagFSVolume* vol, uint64_t fid, uint64_t until, InkWarrant warra
     return rc;
 }
 
+/*
+ * One round of InkArrived: the arriving bit off the record and the file out of
+ * the index's set of the arriving ones — and, kept, the deleted bit and its
+ * term on and the file into the set of the deleted ones — in the one locked
+ * step of a file's fields (InkBookFieldsLocked: one set dropped, one added).
+ */
+static error_t InkArrivedOnce(TagFSVolume* vol, uint64_t fid, uint64_t until, InkReceipt* out)
+{
+    RecordWhere   was;
+    InkFieldsPlan f   = { 0 };
+    FileRecord*   cur = FileMapRecordHold(vol->state.files, fid, &was);
+    if (!cur)
+        return ERR_FILE_NOT_FOUND;
+    error_t rc = InkVolumeBegins(vol);
+    if (rc != OK)
+        goto out;
+    if (!(cur->flags & TAGFS_FILE_ARRIVING)) {
+        out->gen = was.gen;
+        goto out;
+    }
+    uint32_t flags = (cur->flags & ~(uint32_t)TAGFS_FILE_ARRIVING) | (until ? TAGFS_FILE_DELETED : 0u);
+    if (!InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, NULL, 0, &f)) {
+        rc = ERR_NO_MEMORY;
+        goto out;
+    }
+    f.dropped[f.drops++] = TAGFS_ARRIVING_MEMBERS;
+    f.adds               = until != 0;
+    rc = InkBookFields(vol, fid, cur, &was, &f, cur->name, until ? TAGFS_DELETED_MEMBERS : TAGFS_INVALID_TAG_ID,
+                       flags, until, out);
+out:
+    kfree(f.tags);
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkArrived(TagFSVolume* vol, uint64_t fid, uint64_t until, InkReceipt* out)
+{
+    error_t rc;
+    do {
+        rc = InkArrivedOnce(vol, fid, until, out);
+    } while (rc != OK && InkGoesRound(&rc));
+    return rc;
+}
+
+/* One round of InkArrivalLetGo: a Quitclaim of the record as it was read, so a
+ * file that arrived meanwhile — its gen moved — is read again and left. A file
+ * still arriving is in no role (the carry takes none), and none guards it. */
+static error_t InkArrivalLetGoOnce(TagFSVolume* vol, uint64_t fid, InkReceipt* out)
+{
+    RecordWhere was;
+    FallowNode* fallow = NULL;
+    FileRecord* cur    = FileMapRecordHold(vol->state.files, fid, &was);
+    error_t     rc     = OK;
+    if (!cur)
+        return OK;
+    if (!(cur->flags & TAGFS_FILE_ARRIVING)) {
+        out->gen = was.gen;
+    } else {
+        rc = InkVolumeBegins(vol);
+        if (rc == OK)
+            rc = FallowNodeOfRecord(vol, cur, FALLOW_BY_RECORD, &fallow);
+        if (rc == OK)
+            rc = InkBookQuitclaim(vol, fid, &was, cur, fallow, out);
+    }
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkArrivalLetGo(TagFSVolume* vol, uint64_t fid, InkReceipt* out)
+{
+    error_t rc;
+    do {
+        rc = InkArrivalLetGoOnce(vol, fid, out);
+    } while (rc != OK && InkGoesRound(&rc));
+    return rc == ERR_FILE_NOT_FOUND ? OK : rc;
+}
+
 /* `cur`'s list of the programs it shows its tags to with `reader` put in
  * (`show`) or taken out, rising, into `list` — room for one more than it
  * holds: how many it holds then. */
@@ -719,10 +796,19 @@ error_t InkPassport(TagFSVolume* vol, uint64_t fid, uint64_t passport, InkReceip
 error_t InkNew(TagFSVolume* vol, const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                InkReceipt* out)
 {
+    InkBirth b  = { .name = name, .tags = tags, .count = count, .made_by = made_by };
+    error_t  rc = InkVolumeBegins(vol);
+    if (rc != OK)
+        return rc;
+    return InkBookNew(vol, &b, false, out_fid, out);
+}
+
+error_t InkNewArriving(TagFSVolume* vol, const InkBirth* b, uint64_t* out_fid, InkReceipt* out)
+{
     error_t rc = InkVolumeBegins(vol);
     if (rc != OK)
         return rc;
-    return InkBookNew(vol, name, tags, count, made_by, out_fid, out);
+    return InkBookNew(vol, b, true, out_fid, out);
 }
 
 // ----------------------------------------------------------------------------
@@ -751,6 +837,37 @@ static error_t InkQuitclaimOnce(TagFSVolume* vol, uint64_t fid, InkWarrant warra
     if (rc == OK)
         rc = InkBookQuitclaim(vol, fid, &was, cur, fallow, out);
     FileRecordRelease(cur);
+    return rc;
+}
+
+/* One round of InkQuitclaimIf: InkQuitclaimOnce's, the record judged first. */
+static error_t InkQuitclaimIfOnce(TagFSVolume* vol, uint64_t fid, bool (*same)(const FileRecord* rec, void* ctx),
+                                  void* ctx, InkWarrant warrant, InkReceipt* out)
+{
+    TagFSState* fs = &vol->state;
+    RecordWhere was;
+    FileRecord* cur = FileMapRecordHold(fs->files, fid, &was);
+    if (!cur)
+        return ERR_FILE_NOT_FOUND;
+    FallowNode* fallow = NULL;
+    error_t     rc     = same(cur, ctx) ? InkVolumeBegins(vol) : ERR_BUSY;
+    if (rc == OK)
+        rc = InkGuardSays(vol, fid, InkRecordTouchesBoot(vol, cur), cur->flags, warrant);
+    if (rc == OK)
+        rc = FallowNodeOfRecord(vol, cur, FALLOW_BY_RECORD, &fallow);
+    if (rc == OK)
+        rc = InkBookQuitclaim(vol, fid, &was, cur, fallow, out);
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkQuitclaimIf(TagFSVolume* vol, uint64_t fid, bool (*same)(const FileRecord* rec, void* ctx), void* ctx,
+                       InkWarrant warrant, InkReceipt* out)
+{
+    error_t rc;
+    do {
+        rc = InkQuitclaimIfOnce(vol, fid, same, ctx, warrant, out);
+    } while (rc != OK && InkGoesRound(&rc));
     return rc;
 }
 

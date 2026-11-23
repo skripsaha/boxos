@@ -26,6 +26,7 @@
 #include "helm/helm.h"
 #include "keep/keep.h"
 #include "retire/retire.h"
+#include "volume/carry.h"
 #include "mount/away.h"
 #include "mount/perambulation.h"
 #include "mount/hold_ground.h"
@@ -2091,6 +2092,7 @@ void TagFSVolumeService(TagFSVolume* vol)
     SettleServiceIfPending(vol);
     KeepServe(vol);
     RetireServe(vol);
+    CarryServe(vol);
     tagfs_attend_owed_arrival(vol);
     tagfs_ask_for_the_mount_again(vol);
 
@@ -2199,6 +2201,12 @@ static TagFSFileHandle *tagfs_open_inside(TagFSVolume* vol, uint64_t file_id, ui
      */
     bool        reads = (flags & TAGFS_HANDLE_READ) || !(flags & TAGFS_HANDLE_WRITE);
     FileRecord *rec   = FileMapRecordHold(vol->state.files, file_id, NULL);
+    /* A file still arriving opens for the carry laying it alone. */
+    if (rec && (rec->flags & TAGFS_FILE_ARRIVING) && !(flags & TAGFS_HANDLE_ARRIVAL))
+    {
+        FileRecordRelease(rec);
+        rec = NULL;
+    }
     if (!rec)
     {
         tagfs_close(vol, handle);
@@ -2317,12 +2325,17 @@ int tagfs_get_metadata(TagFSVolume* vol, uint64_t file_id, TagFSMetadata *out)
  * medium. Its header — name, tags, flags, size, times — and none of its runs:
  * no caller of this reads them, and a file's runs are walked in its record
  * (file_map/file_record.h), never copied out. -1 for a file the map does not
- * hold, or no memory for the copy. */
+ * hold — nor one still arriving, which is nobody's yet — or no memory for the
+ * copy. */
 static int tagfs_get_metadata_inside(TagFSVolume* vol, uint64_t file_id, TagFSMetadata *out)
 {
     if (!out)
         return -1;
     FileRecord *rec = FileMapRecordHold(vol->state.files, file_id, NULL);
+    if (rec && (rec->flags & TAGFS_FILE_ARRIVING)) {
+        FileRecordRelease(rec);
+        return -1;
+    }
     if (!rec)
         return -1;
     int copied = FileRecordCopyOut(rec, out);

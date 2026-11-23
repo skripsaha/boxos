@@ -30,6 +30,10 @@
  * which already sets members aside, sets these aside by default and asks for
  * them alone when it is asked to (query/query.c). */
 #define TAGFS_DELETED_MEMBERS       0x7FFFFFFFu
+/* The tag index's set of the files still arriving (TAGFS_FILE_ARRIVING), set
+ * aside by every question, the one for the deleted files alone too — an id
+ * past every one a volume gives and no question names, as the set above. */
+#define TAGFS_ARRIVING_MEMBERS      0xFFFFFFFEu
 
 // TagRegistryEntry.flags bits.
 //   HAS_VALUE — entry carries a value (bit 0; persisted, value-presence).
@@ -119,6 +123,30 @@
  * is what puts the passport after the head in the Tally's header and in the
  * ribbon's Born, and what the ribbon's Labeled PASSPORT leaves. */
 #define TAGFS_FILE_PASSPORT         (1 << 9)
+/* The file is still being carried in from another volume (volume/carry.c):
+ * born so, with the name, tags and times of the file it is a copy of, it is
+ * met by no question, no name, no first bytes and no open of a program, and
+ * its writes keep the times it was born with; the carry's last Ink takes the
+ * bit off, and from then on it is the file it was. One the bit is still on
+ * when no carry is under way — the machine stopped, or the medium left, in
+ * the middle of one — is let go by the volume (keep/keep.c), so a copy cut
+ * short is never taken for the file. Bit 10 — put on at the birth only and
+ * taken off by the carry alone, never a flag a caller names, never a tag. */
+#define TAGFS_FILE_ARRIVING         (1 << 10)
+/* The sets of the tag index beside the tags that a record's `flags` put its
+ * file in — the files kept deleted, the files still arriving — into `sets`:
+ * how many. The one rule for every place a file comes into the index or
+ * leaves it: a mount, a replay, an Ink. */
+static inline uint32_t TagFSAsideSets(uint32_t flags, uint32_t sets[2])
+{
+    uint32_t n = 0;
+    if (flags & TAGFS_FILE_DELETED)
+        sets[n++] = TAGFS_DELETED_MEMBERS;
+    if (flags & TAGFS_FILE_ARRIVING)
+        sets[n++] = TAGFS_ARRIVING_MEMBERS;
+    return n;
+}
+
 /* Every passport carries bit 63, so no passport is a file's id (which a
  * volume gives from 1 up) — the book's TALLY_PASSPORT_BIT. */
 #define TAGFS_PASSPORT_BIT          (1ull << 63)
@@ -136,6 +164,7 @@
 #define TAGFS_HANDLE_WRITE          (1 << 1)
 #define TAGFS_HANDLE_APPEND         (1 << 2)   /* every write lands at the file's size */
 #define TAGFS_HANDLE_KEPT           (1 << 3)   /* the volume's own, reaching a file kept in the trash (PlotLoadKept) */
+#define TAGFS_HANDLE_ARRIVAL        (1 << 4)   /* the carry's own, reaching a file still arriving (volume/carry.c) */
 
 // Registry constants
 #define TAGFS_REG_BUCKETS           512

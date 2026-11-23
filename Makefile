@@ -943,7 +943,7 @@ UTIL_NAMES = create show files tag untag name trash delete assemble \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple flappybird chess \
              edit seek retag read rollcall handset inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
-             glyphs drawcheck itemcheck benchmark volumes
+             glyphs drawcheck itemcheck benchmark volumes carry
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1819,7 +1819,8 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/drawcheck.elf "test" \
 	$(UTILS_DIR)/itemcheck.elf "test" \
 	$(UTILS_DIR)/benchmark.elf "" \
-	$(UTILS_DIR)/volumes.elf ""
+	$(UTILS_DIR)/volumes.elf "" \
+	$(UTILS_DIR)/carry.elf ""
 
 # ‼ EVERY PROGRAM ON THE VOLUME IS A BOX. VOLUME_CONTENT names the programs as
 # the tree links them; each ELF there goes onto the volume as the box tools/pack
@@ -1848,7 +1849,7 @@ PACK_ASKS_NOTHING = proca procb
 # Context, which stamps it — seeing them comes with it. see-tags: the programs
 # that show the person's tags, find files by them, or look inside the Use
 # Context.
-PACK_ASKS_CHANGE_TAGS = hub tag untag retag create copy edit read assemble usetest write_observer cxxtest volumes
+PACK_ASKS_CHANGE_TAGS = hub tag untag retag create copy edit read assemble usetest write_observer cxxtest volumes carry
 PACK_ASKS_SEE_TAGS    = files seek tagmap info delete hexer stringview passport display
 PackTagsAsk = $(if $(filter $(1),$(PACK_ASKS_CHANGE_TAGS)),--ask change-tags,$(if $(filter $(1),$(PACK_ASKS_SEE_TAGS)),--ask see-tags))
 PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask utility) \

@@ -7,6 +7,7 @@
 #include "../dedup/dedup.h"
 #include "../keep/keep.h"
 #include "../retire/retire.h"
+#include "../volume/carry.h"
 #include "../mount/away.h"
 #include "../integrity/integrity.h"
 #include "boardroom.h"
@@ -705,6 +706,7 @@ error_t TagFS_RunAllTests(TagFSVolume* vol, TestStats* stats)
     (void)DedupHold(vol, true);
     (void)KeepHold(vol, true);
     (void)RetireHold(vol, true);
+    (void)CarryHold(vol, true);
     for (uint32_t s = 0; s < ARRAY_SIZE(g_suites); s++) {
         const TestSuite* suite = g_suites[s];
         for (uint32_t i = 0; i < suite->count; i++) {
@@ -736,6 +738,7 @@ error_t TagFS_RunAllTests(TagFSVolume* vol, TestStats* stats)
             TestRun(vol, test, registered, stats);
         }
     }
+    (void)CarryHold(vol, false);
     (void)RetireHold(vol, false);
     (void)KeepHold(vol, false);
     (void)DedupHold(vol, false);

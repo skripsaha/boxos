@@ -189,6 +189,23 @@ size_t size_shown(uint64_t bytes, char *out, size_t room);
  * negative -error_t — -ERR_TAGFS_NO_SPACE for a name the volume had no room
  * for, the old one kept. */
 int volume_rename(uint32_t number, const char *name);
+/* The `count` files of `ids` carried to the volume numbered `volume` whole —
+ * their bytes, name, the person's tags and the programs' own, the programs
+ * they show their tags to, a deleted one's term, the program that made them,
+ * the passport of the program they hold, their times. files_copy_to leaves
+ * them where they were too; files_move_to lets each go there once its copy
+ * is the other volume's for good, and leaves one that changed meanwhile
+ * where it was, beside its copy. `ids` go in their order — a program before
+ * the files that name it. `copies` (room for `count`, or NULL) takes the
+ * copies' ids, *carried how many arrived (the first refused ends the call),
+ * *dropped the programs' words left behind where the other volume does not
+ * know the program; either NULL when not wanted. Asked by the person's hands
+ * (change-tags in the box). 0 when every file arrived, or a negative -error_t:
+ * the first refusal. */
+int files_copy_to(uint32_t volume, const file_id_t *ids, size_t count, file_id_t *copies, size_t *carried,
+                  uint32_t *dropped);
+int files_move_to(uint32_t volume, const file_id_t *ids, size_t count, file_id_t *copies, size_t *carried,
+                  uint32_t *dropped);
 static inline uint32_t volume_of(file_id_t file)
 {
     return (uint32_t)((file >> STORAGE_VOLUME_FILE_SHIFT) & 0x7FFFu);

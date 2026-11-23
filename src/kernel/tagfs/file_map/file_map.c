@@ -742,7 +742,7 @@ uint32_t FileMapStartingWith(FileMap* map, const uint8_t* bytes, uint32_t length
     for (FileMapNode* leaf = MapFrom(map, from, &pos); leaf && !(*next && !total); leaf = leaf->next, pos = 0) {
         for (; pos < leaf->count && !(*next && !total); pos++) {
             const FileRecord* rec = leaf->u.entry[pos].record;
-            if (!rec || (rec->flags & TAGFS_FILE_DELETED) || rec->head_len < length ||
+            if (!rec || (rec->flags & (TAGFS_FILE_DELETED | TAGFS_FILE_ARRIVING)) || rec->head_len < length ||
                 memcmp(rec->head, bytes, length) != 0)
                 continue;
             if (total)

@@ -150,6 +150,44 @@ error_t InkTagsRetire(TagFSVolume* vol, const uint32_t* tags, uint32_t count, In
 error_t InkNew(TagFSVolume* vol, const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                InkReceipt* out);
 
+/* A file born as a carry lays it (volume/carry.c): InkNew's fields, its times
+ * as they were on the volume it comes from, the programs it shows its tags to
+ * (rising) and the passport of the program it holds — each in this volume's
+ * terms — and still arriving (TAGFS_FILE_ARRIVING) until InkArrived. Born
+ * with them all, a card of a program is the program's on this volume from its
+ * first Ink, and nothing of it is retired while its bytes still come. */
+typedef struct {
+    const char*     name;
+    const uint32_t* tags;
+    uint32_t        count;
+    uint64_t        made_by;
+    uint64_t        created_ns;
+    uint64_t        modified_ns;
+    const uint64_t* shown;
+    uint32_t        shown_count;
+    uint64_t        passport;
+} InkBirth;
+error_t InkNewArriving(TagFSVolume* vol, const InkBirth* b, uint64_t* out_fid, InkReceipt* out);
+
+/* The file `fid` arrived: the bit taken off its record, and the set of the
+ * files arriving lets it go, in one Ink — and, for `until` past 0, it is
+ * deleted and kept until then in the same Ink, as the file it was. OK, and OK
+ * with no Ink for one that arrived already, or the refusal an Ink of a file's
+ * fields answers. */
+error_t InkArrived(TagFSVolume* vol, uint64_t fid, uint64_t until, InkReceipt* out);
+
+/* The file `fid` let go only while it is still arriving — the carry it came by
+ * is no more: OK for one let go, and OK with nothing done for one that
+ * arrived or is gone; or the refusal of the Quitclaim. */
+error_t InkArrivalLetGo(TagFSVolume* vol, uint64_t fid, InkReceipt* out);
+
+/* The file `fid` given up only while `same` says its record is still the one
+ * the caller knew (a move, volume/carry.c) — judged on the record the
+ * Quitclaim is made of, so no change slips between the two: ERR_BUSY, nothing
+ * changed, for one that is another now; or InkQuitclaim's answer. */
+error_t InkQuitclaimIf(TagFSVolume* vol, uint64_t fid, bool (*same)(const FileRecord* rec, void* ctx), void* ctx,
+                       InkWarrant warrant, InkReceipt* out);
+
 /* The file given up: a Quitclaim kept for the next stitch, its extents to
  * Fallow, and it leaves the map and the tag index. OK, or the refusal — the
  * guard's among them, asked with `warrant` — and ERR_WOULD_BLOCK, nothing

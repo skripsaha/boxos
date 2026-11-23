@@ -63,8 +63,9 @@ static bool UnlessAdd(uint32_t** ids, uint32_t* count, uint32_t* room, uint32_t 
  * (*ids NULL when the question sets none aside). A tag the registry has not
  * is worn by no file, and sets nothing aside. Which tags are set aside is the
  * asker's to say; the volume leaves out only the files it keeps deleted
- * (TAGFS_FILE_DELETED), which `live` adds as the one set more, and which a
- * question for them alone (`live` false) does not. */
+ * (TAGFS_FILE_DELETED), which `live` adds as one set more, and which a
+ * question for them alone (`live` false) does not — and the files still
+ * arriving (TAGFS_FILE_ARRIVING), which every question sets aside. */
 static error_t QueryUnless(TagFSVolume* vol, TagOwner owner, const TagSpelling* without, uint32_t without_count, bool live,
                            uint32_t** ids, uint32_t* count)
 {
@@ -72,7 +73,8 @@ static error_t QueryUnless(TagFSVolume* vol, TagOwner owner, const TagSpelling* 
     uint32_t    room = 0;
     *ids   = NULL;
     *count = 0;
-    if (live && !UnlessAdd(ids, count, &room, TAGFS_DELETED_MEMBERS))
+    if ((live && !UnlessAdd(ids, count, &room, TAGFS_DELETED_MEMBERS)) ||
+        !UnlessAdd(ids, count, &room, TAGFS_ARRIVING_MEMBERS))
         return ERR_NO_MEMORY;
     for (uint32_t i = 0; i < without_count; i++) {
         bool held = true;
@@ -139,8 +141,8 @@ error_t TagFSListPage(TagFSVolume* vol, uint64_t from, uint64_t* out, uint32_t r
         return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
-    const uint32_t aside = TAGFS_DELETED_MEMBERS;
-    ListPageInside(vol, &aside, 1, from, out, room, want_total, page);
+    static const uint32_t aside[] = { TAGFS_DELETED_MEMBERS, TAGFS_ARRIVING_MEMBERS };
+    ListPageInside(vol, aside, 2, from, out, room, want_total, page);
     tagfs_leave(vol);
     return OK;
 }

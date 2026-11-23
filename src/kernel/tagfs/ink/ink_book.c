@@ -208,18 +208,32 @@ static error_t InkBookNewLocked(TagFSVolume* vol, const uint32_t* tags, uint32_t
 }
 
 /* The file is born empty, its times a book's own — nanoseconds (§2.8), as the
- * mount reads them back — and its id the lock's to give: the stakes are taken
- * for the id the lock showed, and taken again when another create took it.
- * `made_by` is the file of the program that makes it, 0 for none: it is in the
- * record from its birth, and in the Born that carries it. */
-error_t InkBookNew(TagFSVolume* vol, const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
-                   InkReceipt* out)
+ * mount reads them back: now, or — for one `arriving` — the times `b` gives;
+ * and its id the lock's to give: the stakes are taken for the id the lock
+ * showed, and taken again when another create took it. `made_by` is the file
+ * of the program that makes it, 0 for none: it is in the record from its
+ * birth, and in the Born that carries it. A file arriving joins the index's
+ * set of them with its tags, in the same locked step. */
+error_t InkBookNew(TagFSVolume* vol, const InkBirth* b, bool arriving, uint64_t* out_fid, InkReceipt* out)
 {
-    TagFSState*   fs   = &vol->state;
-    uint64_t      now  = rtc_get_unix64() * 1000000000ull;
-    TagFSMetadata meta = { .flags = TAGFS_FILE_ACTIVE, .created_time = now, .modified_time = now,
-                           .filename = (char*)name, .tag_ids = (uint32_t*)tags, .tag_count = count,
-                           .made_by = made_by };
+    TagFSState*   fs      = &vol->state;
+    uint64_t      now     = rtc_get_unix64() * 1000000000ull;
+    uint32_t      count   = b->count + (arriving ? 1u : 0u);
+    uint32_t*     tags    = kmalloc(sizeof(uint32_t) * ((size_t)count + 1u));
+    const char*   name    = b->name;
+    TagFSMetadata meta    = { .flags        = TAGFS_FILE_ACTIVE | (arriving ? TAGFS_FILE_ARRIVING : 0u),
+                              .created_time  = arriving ? b->created_ns : now,
+                              .modified_time = arriving ? b->modified_ns : now,
+                              .filename = (char*)name, .tag_ids = (uint32_t*)b->tags, .tag_count = b->count,
+                              .made_by = b->made_by,
+                              .shown_to    = arriving ? (uint64_t*)b->shown : NULL,
+                              .shown_count = arriving ? b->shown_count : 0,
+                              .passport    = arriving ? b->passport : 0 };
+    if (!tags)
+        return ERR_NO_MEMORY;
+    memcpy(tags, b->tags, sizeof(uint32_t) * b->count);
+    if (arriving)
+        tags[b->count] = TAGFS_ARRIVING_MEMBERS;
     FileRecord*   rec  = FileRecordBuild(&meta);
     error_t       rc   = rec ? INK_AGAIN : ERR_NO_MEMORY;
     uint64_t      claim = rec ? DocketClaimOf(JOT_BORN, NULL, rec) : 0;
@@ -248,6 +262,7 @@ error_t InkBookNew(TagFSVolume* vol, const char* name, const uint32_t* tags, uin
         TagBitmapStakeLetGo(st.index);
     }
     FileRecordRelease(rec);
+    kfree(tags);
     if (rc == ERR_TAGFS_FID_EXHAUSTED)
         kprintf("[TagFS] '%s' is not made: every file id a program can name has been given on this volume, "
                 "the last of them %llu\n", name, (unsigned long long)INK_BOOK_FID_MOST);
@@ -283,8 +298,9 @@ static error_t InkBookQuitclaimLocked(TagFSVolume* vol, uint64_t fid, const Reco
     DocketPutLocked(vol, j, spent);
     for (uint32_t i = 0; i < cur->tag_count; i++)
         TagBitmapLeave(fs->bitmap_index, cur->tags[i], fid);
-    if (cur->flags & TAGFS_FILE_DELETED)
-        TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, fid);
+    uint32_t sets[2];
+    for (uint32_t s = 0, n = TagFSAsideSets(cur->flags, sets); s < n; s++)
+        TagBitmapLeave(fs->bitmap_index, sets[s], fid);
     if (*fallow && FallowNodeCommonheld(vol, *fallow, gen)) {
         FallowAdd(vol, *fallow, gen);
         *fallow = NULL;
@@ -314,10 +330,10 @@ error_t InkBookQuitclaim(TagFSVolume* vol, uint64_t fid, const RecordWhere* was,
         SettleInked(vol, out->gen, false);
         RetireOwed(vol);
         TagBitmapShrink(fs->bitmap_index, &fs->lock, cur->tags, cur->tag_count, fid);
-        if (cur->flags & TAGFS_FILE_DELETED) {
-            const uint32_t members = TAGFS_DELETED_MEMBERS;
-            TagBitmapShrink(fs->bitmap_index, &fs->lock, &members, 1, fid);
-        }
+        uint32_t sets[2];
+        uint32_t n = TagFSAsideSets(cur->flags, sets);
+        if (n)
+            TagBitmapShrink(fs->bitmap_index, &fs->lock, sets, n, fid);
     } else {
         JotsLetGo(j);
     }
@@ -502,9 +518,11 @@ static error_t InkBookPlotBuilt(TagFSVolume* vol, const Plot* p, const FileRecor
     error_t  rc     = PlotConveyance(p, cur, &w->sp, &w->nsp);
     if (rc == OK)
         rc = InkBookPlotJoin(vol, p, cur, w);
+    /* A file still arriving keeps the times it was born with: they are the
+     * ones of the file it is a copy of (volume/carry.c). */
+    uint64_t mtime = (cur->flags & TAGFS_FILE_ARRIVING) ? cur->modified_time : rtc_get_unix64() * 1000000000ull;
     if (rc == OK)
-        rc = FileRecordSplice(vol, cur, w->sp, w->nsp, p->size, rtc_get_unix64() * 1000000000ull, &w->rec, &freed,
-                              &nfreed);
+        rc = FileRecordSplice(vol, cur, w->sp, w->nsp, p->size, mtime, &w->rec, &freed, &nfreed);
     if (rc == OK) {
         InkBookPlotFolded(p, w->rec);
         /* The file's first bytes as the Plot left them — a write's laid over

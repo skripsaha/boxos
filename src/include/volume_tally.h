@@ -91,6 +91,7 @@
 #define TALLY_HEAD_MOST      16u     /* the first bytes of a file its card keeps: the file's own, all of a shorter one */
 #define TALLY_FILE_PASSPORT  512u    /* the file holds a signed program: its passport (TallyFileHead.passport) — never a tag */
 #define TALLY_PASSPORT_BIT   (1ull << 63)   /* every passport carries it, so none is a file's id */
+#define TALLY_FILE_ARRIVING  1024u   /* still being carried in from another volume: nobody meets it, a mount lets it go — never a tag */
 #define TALLY_TAG_HAS_VALUE  1u
 #define TALLY_TAG_RETIRED    2u
 #define TALLY_TAG_OWNED      4u      /* a program's own tag: whose it is follows the flags (TallyTag) */

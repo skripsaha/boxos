@@ -559,6 +559,28 @@
  * name its book had no room for, the old name kept. */
 #define STORAGE_VOLUME_NAME         0x2D
 #define STORAGE_VOLUME_NAME_MOST    255u    /* volume_tally.h TALLY_VOLUME_NAME_MOST */
+/* obj.copy and obj.move — files carried to another volume of the house whole:
+ * their bytes, name, the person's tags and the programs' own, the programs
+ * they show their tags to, the term a deleted one is kept until, the program
+ * that made them, the passport of the program they hold, and their times. A
+ * move lets each go where it was once its copy is the other volume's for
+ * good, and leaves one that changed meanwhile where it was, beside its copy
+ * (ERR_BUSY). By the person's hands (change-tags; ERR_ACCESS_DENIED
+ * otherwise). params = [u32 volume]; in_crate = [u64 file ids], in the order
+ * they go — a program before the files that name it, so a whole volume goes
+ * with its programs; out_crate = [u32 carried][u32 dropped][u64 ids of the
+ * copies, carried of them], room for every file asked (ERR_BUFFER_TOO_SMALL).
+ * A program's word is kept where the other volume knows the program — by its
+ * passport, or by a copy of it carried before in the same call — and left
+ * behind otherwise, counted in `dropped`. The answer comes once the last file
+ * arrived: OK, or the refusal of the first that did not, the ones before it
+ * carried; ERR_FILE_NOT_FOUND for an id of no file, ERR_INVALID_ARGUMENT for
+ * one on that volume already, ERR_OBJECT_NOT_FOUND for a volume the house has
+ * not, ERR_PERMISSION_DENIED for a file the system keeps (a volume's maker
+ * lays those), ERR_DEVICE_NOT_READY when a medium left on the way. A copy cut
+ * short is never taken for the file: the volume lets it go. */
+#define STORAGE_OBJ_COPY            0x2E
+#define STORAGE_OBJ_MOVE            0x2F
 #define STORAGE_VOLUME_LISTED_HEAD  52u     /* a record before its name */
 #define STORAGE_VOLUME_HOME         0x01u   /* flags: the volume the machine was booted from */
 #define STORAGE_VOLUME_MOUNTED      0x02u   /* its book is read and its files are found */

@@ -229,6 +229,45 @@ size_t volume_shown(const VolumeListed *v, char *out, size_t room)
     return (size_t)n < room ? (size_t)n : room - 1u;
 }
 
+/* One carry of the storage deck (STORAGE_OBJ_COPY or _MOVE): its answer, and
+ * what its out crate says however it ended. */
+static int files_carried(uint16_t op, uint32_t volume, const file_id_t *ids, size_t count, file_id_t *copies,
+                         size_t *carried, uint32_t *dropped)
+{
+    if (carried) *carried = 0;
+    if (dropped) *dropped = 0;
+    if (!ids || !count || count > (UINT32_MAX - 8u) / 8u) return -ERR_INVALID_ARGUMENT;
+    uint32_t bytes = 8u + 8u * (uint32_t)count, got = 0;
+    uint8_t *out   = malloc(bytes);
+    if (!out) return -ERR_NO_MEMORY;
+    memset(out, 0, 8);
+    int rc = MfCall1(DECK_STORAGE, op, &volume, sizeof(volume), ids, (uint32_t)(8u * count), out, bytes, &got,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    uint32_t done = 0, left = 0;
+    if (got >= 8) {
+        memcpy(&done, out, 4);
+        memcpy(&left, out + 4, 4);
+        if (done > count) done = (uint32_t)count;
+    }
+    if (copies && done) memcpy(copies, out + 8, 8u * (size_t)done);
+    if (carried) *carried = done;
+    if (dropped) *dropped = left;
+    free(out);
+    return box_fail(rc);
+}
+
+int files_copy_to(uint32_t volume, const file_id_t *ids, size_t count, file_id_t *copies, size_t *carried,
+                  uint32_t *dropped)
+{
+    return files_carried(STORAGE_OBJ_COPY, volume, ids, count, copies, carried, dropped);
+}
+
+int files_move_to(uint32_t volume, const file_id_t *ids, size_t count, file_id_t *copies, size_t *carried,
+                  uint32_t *dropped)
+{
+    return files_carried(STORAGE_OBJ_MOVE, volume, ids, count, copies, carried, dropped);
+}
+
 int volume_rename(uint32_t number, const char *name)
 {
     size_t len = name ? strlen(name) : 0;

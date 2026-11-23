@@ -41,6 +41,18 @@ int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Cr
  * the cycle's refusal; the name's own refusal (VolumeNameAsk) at once. */
 int SettleVolumeNamed(TagFSVolume *vol, const char *text, size_t len, const OpContext *ctx, Crate *crates);
 
+/* The files `ids` — `count` of them, as the house names them, on volumes other
+ * than `to` — carried to `to` whole (volume/carry.h), and let go where they
+ * were for a `move`. `out`, when there is one, takes [u32 carried][u32
+ * dropped][u64 ids of the copies], room for every file asked before anything
+ * moves (ERR_BUFFER_TOO_SMALL). A program is parked until the carry is over
+ * (ERR_WOULD_BLOCK) and answered OK, or the refusal of the first file that
+ * did not arrive — the ones before it arrived; a caller in the kernel is
+ * answered so in its call. ERR_FILE_NOT_FOUND for an id of no file,
+ * ERR_INVALID_ARGUMENT for one on `to` already, nothing carried. */
+int SettleCarried(TagFSVolume *to, const uint64_t *ids, uint32_t count, bool move, const OpContext *ctx,
+                  Crate *crates, Crate *out);
+
 /*
  * A storage deck handler whose operation the volume answered ERR_WOULD_BLOCK —
  * room a Settle cycle gives back, nothing of the operation done — hands it

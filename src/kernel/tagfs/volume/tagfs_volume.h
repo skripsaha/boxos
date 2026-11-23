@@ -45,6 +45,7 @@
 #include "../mount/under_glass.h"
 #include "../read/read.h"
 #include "../retire/retire.h"
+#include "carry.h"
 #include "../run/run.h"
 #include "../scribe/scribe.h"
 #include "../settle/binder.h"
@@ -355,6 +356,7 @@ struct TagFSVolume {
     ScribeState           scribe;
     KeepState             keep;
     RetireState           retire;
+    CarryState            carry;            /* the carries laying files on it (volume/carry.h) */
     ShowState             show;
 
     /* what it checks of itself (integrity/) and what it finds alike (dedup/) */

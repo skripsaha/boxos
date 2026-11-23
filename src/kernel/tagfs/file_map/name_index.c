@@ -19,10 +19,11 @@ static FileRecord* LinkOwner(const NameLink* link)
     return (FileRecord*)((uint8_t*)first - offsetof(FileRecord, name_link));
 }
 
-/* Whether the record is in the index at all: a file kept deleted is not. */
+/* Whether the record is in the index at all: a file kept deleted is not, nor
+ * one still arriving. */
 static bool Indexed(const FileRecord* rec)
 {
-    return rec && !(rec->flags & TAGFS_FILE_DELETED);
+    return rec && !(rec->flags & (TAGFS_FILE_DELETED | TAGFS_FILE_ARRIVING));
 }
 
 uint32_t TagFSNameWords(const char* name, size_t length, size_t lengths[2])

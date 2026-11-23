@@ -1,7 +1,8 @@
 /*
  * Storage Deck — the volumes of the house: storage.volume.list,
- * storage.volume.info and storage.volume.name (boxos_decks.h, where the
- * layouts are said once). What a person sees of where a file lies: every
+ * storage.volume.info and storage.volume.name, and files carried between
+ * them, storage.copy and storage.move (boxos_decks.h, where the layouts are
+ * said once). What a person sees of where a file lies: every
  * volume, its number — the one a file's id carries —, the name the person
  * gave it, whether it is the home volume, mounted, taking no change or away,
  * how big it is and how full, and what it is on.
@@ -139,4 +140,34 @@ int ObjVolumeName(const ManifestOp *op, Crate *crates, uint16_t crate_count, con
     TagFSVolume *vol = TagFSVolumeNumbered(param_u32(op, 0));
     if (!vol) return ERR_OBJECT_NOT_FOUND;
     return SettleVolumeNamed(vol, (const char *)op->params + 6, len, ctx, crates);
+}
+
+/* STORAGE_OBJ_COPY / STORAGE_OBJ_MOVE  params: [u32 volume]; in_crate: the ids. */
+static int ObjCarry(const ManifestOp *op, Crate *crates, const OpContext *ctx, bool move)
+{
+    if (op->param_size < 4 || op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    if (!StoragePersonSays(ctx, true)) return ERR_ACCESS_DENIED;
+    TagFSVolume *to = TagFSVolumeNumbered(param_u32(op, 0));
+    if (!to) return ERR_OBJECT_NOT_FOUND;
+    const Crate *in    = &crates[op->in_crate];
+    uint64_t     count = in->size / 8u;
+    if (!count || in->size % 8u || count > UINT32_MAX) return ERR_INVALID_ARGUMENT;
+    uint64_t *ids = crate_in_buf(in, ctx);
+    if (!ids) return ERR_INVALID_ADDRESS;
+    Crate *out = op->out_crate == CRATE_INDEX_NONE ? NULL : &crates[op->out_crate];
+    int    rc  = SettleCarried(to, ids, (uint32_t)count, move, ctx, crates, out);
+    crate_buf_free(ids);
+    return rc;
+}
+
+int ObjCopy(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crate_count;
+    return ObjCarry(op, crates, ctx, false);
+}
+
+int ObjMove(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crate_count;
+    return ObjCarry(op, crates, ctx, true);
 }

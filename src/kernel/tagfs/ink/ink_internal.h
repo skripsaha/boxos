@@ -79,8 +79,7 @@ error_t  InkBookFields(TagFSVolume* vol, uint64_t fid, FileRecord* cur, const Re
  * own, no record (the registry owes the book a Coined RETIRED of each, which
  * the stitch that takes the gen lays). ERR_BUSY when a file wears one still. */
 error_t  InkBookRetire(TagFSVolume* vol, const uint32_t* tags, uint32_t count, InkReceipt* out);
-error_t  InkBookNew(TagFSVolume* vol, const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
-                    InkReceipt* out);
+error_t  InkBookNew(TagFSVolume* vol, const InkBirth* b, bool arriving, uint64_t* out_fid, InkReceipt* out);
 error_t  InkBookQuitclaim(TagFSVolume* vol, uint64_t fid, const RecordWhere* was, const FileRecord* cur, FallowNode* fallow,
                           InkReceipt* out);
 

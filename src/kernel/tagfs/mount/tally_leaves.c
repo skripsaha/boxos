@@ -487,8 +487,9 @@ error_t BookFileLockLive(TagFSVolume* vol, uint64_t fid, const char* why)
         BookGroundHoldRun(vol, run.start, run.count);
     for (uint32_t t = 0; rc == OK && t < rec->tag_count; t++)
         TagBitmapLeave(fs->bitmap_index, rec->tags[t], fid);
-    if (rec->flags & TAGFS_FILE_DELETED)
-        TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, fid);
+    uint32_t sets[2];
+    for (uint32_t s = 0, n = TagFSAsideSets(rec->flags, sets); s < n; s++)
+        TagBitmapLeave(fs->bitmap_index, sets[s], fid);
     FileRecordRelease(rec);
     if (rc == OK) {
         FileMapDrop(fs->files, fid, &was);
@@ -521,8 +522,10 @@ static error_t BookFileLive(TagFSVolume* vol, BookFile* f)
     for (uint32_t t = 0; t < f->meta.tag_count; t++)
         if (tag_bitmap_set(fs->bitmap_index, f->meta.tag_ids[t], f->fid) != 0)
             return ERR_NO_MEMORY;
-    if ((f->meta.flags & TAGFS_FILE_DELETED) && tag_bitmap_set(fs->bitmap_index, TAGFS_DELETED_MEMBERS, f->fid) != 0)
-        return ERR_NO_MEMORY;
+    uint32_t sets[2];
+    for (uint32_t s = 0, n = TagFSAsideSets(f->meta.flags, sets); s < n; s++)
+        if (tag_bitmap_set(fs->bitmap_index, sets[s], f->fid) != 0)
+            return ERR_NO_MEMORY;
     char words[160];
     if (f->ext) {
         ksnprintf(words, sizeof(words), "a run of fid %llu carries an extension this kernel cannot carry "
@@ -659,8 +662,9 @@ void BookFacsimileUndone(TagFSVolume* vol, uint64_t lo, uint64_t hi)
                 continue;
             for (uint32_t t = 0; t < rec->tag_count; t++)
                 TagBitmapLeave(fs->bitmap_index, rec->tags[t], ids[i]);
-            if (rec->flags & TAGFS_FILE_DELETED)
-                TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, ids[i]);
+            uint32_t sets[2];
+            for (uint32_t s = 0, n = TagFSAsideSets(rec->flags, sets); s < n; s++)
+                TagBitmapLeave(fs->bitmap_index, sets[s], ids[i]);
             FileRecordRelease(rec);
             FileMapDrop(fs->files, ids[i], &was);
             vol->book.files--;

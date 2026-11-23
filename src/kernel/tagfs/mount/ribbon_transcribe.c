@@ -405,8 +405,8 @@ uint64_t RibbonFlagsOf(const RibbonReplay* rp, const RibbonStage* st, const File
 // ----------------------------------------------------------------------------
 
 /* The tags `rec` wears that `other` does not — NULL wearing none — each out
- * of (`leave`) or into the tag index, and the set of the deleted files too
- * when `rec` is kept deleted and `other` is not. ERR_NO_MEMORY. */
+ * of (`leave`) or into the tag index, and each set beside them `rec` is in
+ * and `other` is not (TagFSAsideSets). ERR_NO_MEMORY. */
 static error_t RibbonTagsMoved(TagFSVolume* vol, const FileRecord* rec, const FileRecord* other, uint64_t fid, bool leave)
 {
     TagFSState* fs = &vol->state;
@@ -421,10 +421,18 @@ static error_t RibbonTagsMoved(TagFSVolume* vol, const FileRecord* rec, const Fi
         else if (tag_bitmap_set(fs->bitmap_index, rec->tags[i], fid) != 0)
             return ERR_NO_MEMORY;
     }
-    if (rec && (rec->flags & TAGFS_FILE_DELETED) && !(other && (other->flags & TAGFS_FILE_DELETED))) {
+    uint32_t sets[2], others[2];
+    uint32_t n = rec ? TagFSAsideSets(rec->flags, sets) : 0;
+    uint32_t m = other ? TagFSAsideSets(other->flags, others) : 0;
+    for (uint32_t i = 0; i < n; i++) {
+        bool both = false;
+        for (uint32_t k = 0; k < m; k++)
+            both |= others[k] == sets[i];
+        if (both)
+            continue;
         if (leave)
-            TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, fid);
-        else if (tag_bitmap_set(fs->bitmap_index, TAGFS_DELETED_MEMBERS, fid) != 0)
+            TagBitmapLeave(fs->bitmap_index, sets[i], fid);
+        else if (tag_bitmap_set(fs->bitmap_index, sets[i], fid) != 0)
             return ERR_NO_MEMORY;
     }
     return OK;

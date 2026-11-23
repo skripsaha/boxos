@@ -50,17 +50,20 @@
 #include "ink.h"
 #include "use_memory.h"
 #include "volume_name.h"
+#include "carry.h"
 #include "escheat.h"
 #include "conjugate.h"
 #include "async/write_job.h"   /* StorageCallWarrant */
 #include "helm.h"        /* HelmReady — an op waited for room is asked again at a service point */
 #include "amp.h"
+#include "atomics.h"
 
 typedef enum {
     SETTLE_OP_ANCHOR = 0,
     SETTLE_OP_SETTLED,
     SETTLE_OP_USE,
     SETTLE_OP_NAME,
+    SETTLE_OP_CARRY,
     SETTLE_OP_ROOM,
 } SettleOpKind;
 
@@ -74,7 +77,8 @@ typedef struct {
     uint8_t      kind;           /* SettleOpKind */
     uint64_t     ticket;         /* USE: the demand the word is (UseMemorySay); NAME: the name (VolumeNameSay) */
     UseText*     said;           /* USE: the word, held until the answer */
-    Crate*       out;            /* USE: the out crate, inside the staged crates */
+    Crate*       out;            /* USE, CARRY: the out crate, inside the staged crates */
+    struct CarryCall* carry;     /* CARRY: the carry it waits for, let go with the answer */
     Crate*       crates_kbuf;    /* the staged crates, released with the answer */
     uint16_t     crate_count;
     uintptr_t    crates_uaddr;
@@ -144,6 +148,39 @@ static void SettleOpSay(uint8_t kind, uint64_t file_id, uint32_t pid, error_t rc
  * and is kept by the push. A `use` is told whether the volume remembers, and
  * is never refused: its context stands either way. An op asked again for room
  * answers what it answered. */
+/* A carry a deck call began (SettleCarried): the carry, its items, and how
+ * its end is answered — the parked program's wait, or the kernel caller's
+ * flag. Let go with the answer. */
+typedef struct CarryCall {
+    Carry           carry;
+    SettleOpWait*   parked;       /* the program's; NULL for a caller in the kernel */
+    volatile uint32_t ended;      /* the kernel caller's: the carry is over */
+    CarryItem       items[];
+} CarryCall;
+
+/* What a carry answers into `out` — [u32 carried][u32 dropped][u64 ids], each
+ * id as the house names it — through `vmm`, the parked program's pages, or
+ * as the kernel's own crate with none. */
+static void SettleCarrySay(const CarryCall* call, Crate* out, vmm_context_t* vmm)
+{
+    const Carry* c     = &call->carry;
+    uint64_t     bytes = 8u + 8u * (uint64_t)c->done;
+    uint8_t*     kp    = out ? kmalloc(bytes) : NULL;
+    if (!kp)
+        return;
+    memcpy(kp, &c->done, 4);
+    memcpy(kp + 4, &c->dropped, 4);
+    for (uint32_t i = 0; i < c->done; i++) {
+        uint64_t id = TagFSHouseId(c->to, c->items[i].arrived);
+        memcpy(kp + 8 + 8u * (uint64_t)i, &id, 8);
+    }
+    bool said = vmm ? vmm_user_buf_commit_out(vmm, (uintptr_t)out->addr, kp, bytes) == OK
+                    : crate_write(out, NULL, kp, bytes) == OK;
+    if (said)
+        out->size = bytes;
+    kfree(kp);
+}
+
 static void SettleOpAnswered(SettleWaiter* w, error_t rc)
 {
     SettleOpWait*  s      = (SettleOpWait*)w;
@@ -159,11 +196,16 @@ static void SettleOpAnswered(SettleWaiter* w, error_t rc)
         answer = OK;
     } else if (s->kind == SETTLE_OP_NAME) {
         answer = rc == OK && VolumeNameRefused(s->vol, s->ticket) ? ERR_TAGFS_NO_SPACE : rc;
+    } else if (s->kind == SETTLE_OP_CARRY) {
+        if (s->carry)
+            SettleCarrySay(s->carry, s->out, vmm);
+        answer = rc;
     } else if (s->kind != SETTLE_OP_ROOM) {
         SettleOpSay(s->kind, s->file_id, pid, rc);
     }
     answer = ChitAnswer(answer, pid, s->submit_cookie, s->holder);
     kfree(s->op);
+    kfree(s->carry);
 
 #ifdef CONFIG_VOLUME_TESTS
     if (s->stand) {
@@ -407,6 +449,73 @@ int SettleVolumeNamed(TagFSVolume *vol, const char *text, size_t len, const OpCo
     }
     tagfs_leave(vol);
     return rc;
+}
+
+/* A carry's end: the parked program answered, or the kernel caller told. */
+static void SettleCarryEnded(Carry* c)
+{
+    CarryCall* call = container_of(c, CarryCall, carry);
+    if (call->parked)
+        SettleOpAnswered(&call->parked->w, c->rc);
+    else
+        __atomic_store_n(&call->ended, 1u, __ATOMIC_RELEASE);
+}
+
+int SettleCarried(TagFSVolume *to, const uint64_t *ids, uint32_t count, bool move, const OpContext *ctx,
+                  Crate *crates, Crate *out)
+{
+    if (!count || (out && out->capacity < 8u + 8u * (uint64_t)count))
+        return count ? ERR_BUFFER_TOO_SMALL : ERR_INVALID_ARGUMENT;
+    CarryCall* call = kmalloc(sizeof(CarryCall) + sizeof(CarryItem) * count);
+    if (!call)
+        return ERR_NO_MEMORY;
+    memset(call, 0, sizeof(CarryCall) + sizeof(CarryItem) * count);
+    for (uint32_t i = 0; i < count; i++) {
+        call->items[i].from = TagFSVolumeOfId(ids[i], &call->items[i].fid);
+        if (!call->items[i].from || call->items[i].from == to) {
+            error_t rc = call->items[i].from ? ERR_INVALID_ARGUMENT : ERR_FILE_NOT_FOUND;
+            kfree(call);
+            return rc;
+        }
+    }
+    Carry* c   = &call->carry;
+    c->to      = to;
+    c->items   = call->items;
+    c->count   = count;
+    c->move    = move;
+    c->warrant = StorageCallWarrant(ctx);
+    c->ended   = SettleCarryEnded;
+
+    /* A caller in the kernel has no program to park: it turns the service
+     * points itself until the carry is over. */
+    if (!ctx || !ctx->proc) {
+        error_t rc = CarryBegin(c);
+        while (rc == OK && !__atomic_load_n(&call->ended, __ATOMIC_ACQUIRE)) {
+            TagFSServiceIfPending();
+            cpu_pause();
+        }
+        if (rc == OK) {
+            SettleCarrySay(call, out, NULL);
+            rc = c->rc;
+        }
+        kfree(call);
+        return rc;
+    }
+    SettleOpWait* s = SettleOpPark(ctx, crates, SETTLE_OP_CARRY, to, 0, move ? "storage.move" : "storage.copy");
+    if (!s) {
+        kfree(call);
+        return ERR_NO_MEMORY;
+    }
+    s->out       = out;
+    s->carry     = call;
+    call->parked = s;
+    error_t rc   = CarryBegin(c);
+    if (rc != OK) {
+        s->carry = NULL;
+        kfree(call);
+        SettleOpAnswered(&s->w, rc);
+    }
+    return ERR_WOULD_BLOCK;
 }
 
 // ----------------------------------------------------------------------------

@@ -5,6 +5,7 @@
 #include "../ink/fallow.h"
 #include "../keep/keep.h"
 #include "../retire/retire.h"
+#include "../volume/carry.h"
 #include "../show/show.h"
 #include "../settle_cut/settle_cut.h"
 #include "../helm/helm.h"          /* HelmOwed — a change in flight, which no clean seal outruns */
@@ -41,6 +42,7 @@ void SettleMountReset(TagFSVolume* vol)
     CadenceMountReset(vol);
     KeepMountReset(vol);
     RetireMountReset(vol);
+    CarryMountReset(vol);
     ShowMountReset(vol);
     __atomic_store_n(&vol->settle.settled_gen, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&vol->settle.cycles, 0, __ATOMIC_RELEASE);
