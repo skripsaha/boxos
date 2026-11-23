@@ -530,6 +530,30 @@
  * a file kept deleted (obj.keep) is not met. */
 #define STORAGE_HEAD_QUERY          0x2A
 #define STORAGE_HEAD_MOST           16u
+
+/* volume.list — every volume of the house: the home volume, the one the
+ * machine was booted from, number 0, and every other one met on any medium
+ * since, each numbered as it was first met and never numbered again this
+ * boot. A file's id names its volume: the number in bits 48..62 of it
+ * (STORAGE_VOLUME_FILE_SHIFT). No params. out_crate = [u32 delivered]
+ * [u32 total], then `delivered` records [u32 number][u32 flags (STORAGE_
+ * VOLUME_*)][u8 uuid[16]][u64 bytes][u64 free bytes][u64 files][u16 name_len]
+ * [u16 medium_len][name][medium] while they fit, in the order of the numbers:
+ * the size, the free bytes and the files of a volume that is mounted, 0 of one
+ * that is not; `name` the one a person gave the volume, none when nobody
+ * has; `medium` what the medium it is on calls itself. */
+#define STORAGE_VOLUME_LIST         0x2B
+/* volume.info — one volume of the house: params = [u32 number]; out_crate =
+ * one record as volume.list's. ERR_OBJECT_NOT_FOUND for a number the house
+ * gave no volume. */
+#define STORAGE_VOLUME_INFO         0x2C
+#define STORAGE_VOLUME_LISTED_HEAD  52u     /* a record before its name */
+#define STORAGE_VOLUME_HOME         0x01u   /* flags: the volume the machine was booted from */
+#define STORAGE_VOLUME_MOUNTED      0x02u   /* its book is read and its files are found */
+#define STORAGE_VOLUME_READ_ONLY    0x04u   /* it takes no change: under glass, or its medium refuses writes */
+#define STORAGE_VOLUME_AWAY         0x08u   /* its medium left; its book is held open for its return */
+#define STORAGE_VOLUME_REMOVABLE    0x10u   /* its medium is a removable one */
+#define STORAGE_VOLUME_FILE_SHIFT   48u     /* a file id's volume number begins at this bit */
 #define STORAGE_SHOWN_TO_ME         0
 #define STORAGE_SHOWN_BY            1
 #define STORAGE_ASKS_TO_SEE         2

@@ -30,6 +30,27 @@ TagFSVolume* TagFSVolumeOfId(uint64_t id, uint64_t* fid);
  * not; NULL when the house holds none. */
 TagFSVolume* TagFSVolumeOfUuid(const uint8_t uuid[16]);
 
+/* What the house says of one of its volumes (volume/house.c): its number;
+ * whether it is the home volume, mounted, taking no change — under glass, or
+ * its medium refusing writes —, away — its medium left, its book held open
+ * (mount/away.h) —, on a removable medium; the sixteen bytes it calls itself;
+ * while mounted how many bytes it is, how many of them no file holds, and
+ * how many files it has; and its medium's own name, NUL-ended. */
+typedef struct {
+    uint32_t number;
+    bool     home;
+    bool     mounted;
+    bool     read_only;
+    bool     away;
+    bool     removable;
+    uint8_t  uuid[16];
+    uint64_t bytes;
+    uint64_t free_bytes;
+    uint64_t files;
+    char     medium[48];
+} TagFSVolumeFacts;
+void         TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out);
+
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
 #include "tagfs_constants.h"

@@ -468,6 +468,8 @@ error_t StorageDeckRegister(void)
         { STORAGE_TAG_LIST,     ObjTagList,      OP_AUTH_APP, "storage.tag.list" },
         { STORAGE_NAME_QUERY,   ObjNameQuery,    OP_AUTH_APP, "storage.name.query" },
         { STORAGE_HEAD_QUERY,   ObjHeadQuery,    OP_AUTH_APP, "storage.head.query" },
+        { STORAGE_VOLUME_LIST,  ObjVolumeList,   OP_AUTH_APP, "storage.volume.list" },
+        { STORAGE_VOLUME_INFO,  ObjVolumeInfo,   OP_AUTH_APP, "storage.volume.info" },
         { STORAGE_OBJ_READ,     ObjRead,         OP_AUTH_APP, "storage.read"     },
         { STORAGE_OBJ_GET_INFO, ObjGetInfo,      OP_AUTH_APP, "storage.getinfo"  },
         { STORAGE_TAG_SHOWN,    ObjTagShown,     OP_AUTH_APP, "storage.tag.shown" },

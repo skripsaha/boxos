@@ -55,6 +55,33 @@ bool TagFSVolumeMounted(const TagFSVolume* vol)
     return vol->state.initialized;
 }
 
+void TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out)
+{
+    memset(out, 0, sizeof(*out));
+    out->number = vol->number;
+    out->home   = vol == &s_home;
+    if (vol->mount.uuid_known)
+        memcpy(out->uuid, vol->mount.uuid, 16);
+    uint8_t seat = vol->mount.seat;
+    if (seat != BOARDROOM_NO_SEAT) {
+        const char* name = BoardroomSeatName(seat);
+        size_t      n    = name ? strnlen(name, sizeof(out->medium) - 1u) : 0;
+        if (n)
+            memcpy(out->medium, name, n);
+        out->removable = BoardroomSeatKind(seat) == BOARD_USB;
+    }
+    out->away = vol->state.initialized && TagFSMediumLeft(vol);
+    if (!tagfs_enter(vol))
+        return;
+    out->mounted   = true;
+    out->read_only = TagFSIsUnderGlass(vol) || TagFSReadOnly(vol);
+    out->bytes     = vol->state.volume_bytes;
+    out->files     = vol->state.total_files;
+    if (BlockMapDerivedUp(vol))
+        out->free_bytes = AllotmentFreeUnpromised(vol) * (uint64_t)VOLUME_BLOCK_BYTES;
+    tagfs_leave(vol);
+}
+
 uint64_t TagFSHouseId(const TagFSVolume* vol, uint64_t fid)
 {
     return fid ? ((uint64_t)vol->number << TAGFS_VOLUME_FILE_BITS) | fid : 0;

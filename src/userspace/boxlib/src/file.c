@@ -42,17 +42,20 @@ static size_t whose_put(uint8_t *out, TagsOf whose)
  *  CREATE / QUERY — inside the Use Context, or everywhere
  * ========================================================================= */
 
-static int64_t create_scoped(TagsOf whose, const char *filename, const char *tags, uint8_t scope)
+static int64_t create_scoped(TagsOf whose, const char *filename, const char *tags, uint8_t scope, uint32_t volume)
 {
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t fn_len = strlen(filename);
     if (fn_len >= 32) return -ERR_INVALID_ARGUMENT;
 
-    /* params: 32 bytes of NUL-padded filename, then the scope and the whose. */
-    uint8_t params[33 + WHOSE_MOST] = {0};
+    /* params: 32 bytes of NUL-padded filename, then the scope, the whose and
+     * the volume's number. */
+    uint8_t params[33 + WHOSE_MOST + 4] = {0};
     memcpy(params, filename, fn_len);
     params[32] = scope;
     size_t params_size = 33 + whose_put(params + 33, whose);
+    memcpy(params + params_size, &volume, sizeof(volume));
+    params_size += sizeof(volume);
 
     /* in_crate: tag list (optional). */
     const void *in = NULL;
@@ -74,12 +77,115 @@ static int64_t create_scoped(TagsOf whose, const char *filename, const char *tag
 
 int64_t create(TagsOf whose, const char *filename, const char *tags)
 {
-    return create_scoped(whose, filename, tags, STORAGE_SCOPE_USE);
+    return create_scoped(whose, filename, tags, STORAGE_SCOPE_USE, 0);
 }
 
 int64_t create_everywhere(TagsOf whose, const char *filename, const char *tags)
 {
-    return create_scoped(whose, filename, tags, STORAGE_SCOPE_EVERYWHERE);
+    return create_scoped(whose, filename, tags, STORAGE_SCOPE_EVERYWHERE, 0);
+}
+
+int64_t create_on(uint32_t volume, TagsOf whose, const char *filename, const char *tags)
+{
+    return create_scoped(whose, filename, tags, STORAGE_SCOPE_USE, volume);
+}
+
+/* =========================================================================
+ *  VOLUMES — the house's
+ * ========================================================================= */
+
+/* The records of a volume answer laid out as VolumeListed, each one's name and
+ * medium as NUL-ended texts after them, in one block: *out, `count` of them. */
+static int volumes_laid(const uint8_t *records, size_t bytes, uint32_t count, VolumeListed **out)
+{
+    size_t text = 0, at = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint16_t name_len, medium_len;
+        if (at + STORAGE_VOLUME_LISTED_HEAD > bytes) return -ERR_INTERNAL;
+        memcpy(&name_len, records + at + 48, 2);
+        memcpy(&medium_len, records + at + 50, 2);
+        if (at + STORAGE_VOLUME_LISTED_HEAD + name_len + medium_len > bytes) return -ERR_INTERNAL;
+        text += (size_t)name_len + medium_len + 2u;
+        at   += STORAGE_VOLUME_LISTED_HEAD + name_len + medium_len;
+    }
+    VolumeListed *list = malloc(count * sizeof(VolumeListed) + text + 1u);
+    if (!list) return -ERR_NO_MEMORY;
+    char *pen = (char *)(list + count);
+    at = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *r = records + at;
+        uint32_t       flags;
+        uint16_t       name_len, medium_len;
+        memcpy(&list[i].Number, r, 4);
+        memcpy(&flags, r + 4, 4);
+        memcpy(list[i].Uuid, r + 8, 16);
+        memcpy(&list[i].Bytes, r + 24, 8);
+        memcpy(&list[i].FreeBytes, r + 32, 8);
+        memcpy(&list[i].Files, r + 40, 8);
+        memcpy(&name_len, r + 48, 2);
+        memcpy(&medium_len, r + 50, 2);
+        list[i].Home      = (flags & STORAGE_VOLUME_HOME) != 0;
+        list[i].Mounted   = (flags & STORAGE_VOLUME_MOUNTED) != 0;
+        list[i].ReadOnly  = (flags & STORAGE_VOLUME_READ_ONLY) != 0;
+        list[i].Away      = (flags & STORAGE_VOLUME_AWAY) != 0;
+        list[i].Removable = (flags & STORAGE_VOLUME_REMOVABLE) != 0;
+        list[i].Name      = pen;
+        memcpy(pen, r + STORAGE_VOLUME_LISTED_HEAD, name_len);
+        pen += name_len;
+        *pen++ = '\0';
+        list[i].Medium = pen;
+        memcpy(pen, r + STORAGE_VOLUME_LISTED_HEAD + name_len, medium_len);
+        pen += medium_len;
+        *pen++ = '\0';
+        at += STORAGE_VOLUME_LISTED_HEAD + name_len + medium_len;
+    }
+    *out = list;
+    return 0;
+}
+
+/* A record: its fixed part, a name and a medium of 255 bytes at the most. */
+#define VOLUME_RECORD_MOST (STORAGE_VOLUME_LISTED_HEAD + 2u * 255u)
+
+int volume_list(VolumeListed **out, size_t *count)
+{
+    if (!out || !count) return -ERR_INVALID_ARGUMENT;
+    *out   = NULL;
+    *count = 0;
+    /* Asked again with room for every volume the last answer counted. */
+    for (uint32_t room = 4;;) {
+        size_t   size = 8u + (size_t)room * VOLUME_RECORD_MOST;
+        uint8_t *page = malloc(size);
+        if (!page) return -ERR_NO_MEMORY;
+        int rc = MfCall1(DECK_STORAGE, STORAGE_VOLUME_LIST, NULL, 0, NULL, 0, page, (uint32_t)size, NULL,
+                         BOX_ANSWER_GUARANTEED, NULL);
+        if (rc != 0) {
+            free(page);
+            return box_fail(rc);
+        }
+        uint32_t delivered, total;
+        memcpy(&delivered, page, 4);
+        memcpy(&total, page + 4, 4);
+        if (delivered < total) {
+            free(page);
+            room = total + 1u;
+            continue;
+        }
+        rc = volumes_laid(page + 8, size - 8, delivered, out);
+        free(page);
+        if (rc == 0) *count = delivered;
+        return rc;
+    }
+}
+
+int volume_info(uint32_t number, VolumeListed **out)
+{
+    if (!out) return -ERR_INVALID_ARGUMENT;
+    *out = NULL;
+    uint8_t page[VOLUME_RECORD_MOST];
+    int rc = MfCall1(DECK_STORAGE, STORAGE_VOLUME_INFO, &number, sizeof(number), NULL, 0, page, sizeof(page), NULL,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != 0) return box_fail(rc);
+    return volumes_laid(page, sizeof(page), 1, out);
 }
 
 /* The kernel answers [u32 delivered][u32 total][u64 ids[delivered]]: how many

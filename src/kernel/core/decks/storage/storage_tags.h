@@ -21,6 +21,8 @@ int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count, const O
 int ObjGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
 int ObjTagShow(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
 int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
+int ObjVolumeList(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
+int ObjVolumeInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
 
 /* One page of a list a deck answer gives, of volume `vol`: up to `room` of
  * the volume's own ids from `from` on into `out`, and how many there are when

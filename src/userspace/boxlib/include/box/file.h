@@ -146,6 +146,39 @@ bool FileMetadataWears(const FileMetadata *Metadata, const char *Key);
  */
 int64_t create(TagsOf whose, const char* filename, const char* tags);
 int64_t create_everywhere(TagsOf whose, const char* filename, const char* tags);
+/* The same as create, on the volume numbered `volume` (VolumeListed) — create
+ * makes its file on the home volume, number 0. */
+int64_t create_on(uint32_t volume, TagsOf whose, const char* filename, const char* tags);
+
+/*
+ * The volumes of the house: every BoxOS volume the machine holds — the home
+ * one, number 0, the volume it was booted from, and every other one met on any
+ * medium since, numbered as it was first met. A query finds the files of all
+ * of them; a file's id carries the number of the volume it lies on
+ * (volume_of). volume_list answers how many there are and lays them out in
+ * one block — *out, free() it whole — with their texts after them; volume_info
+ * the one numbered `number`, in a block of its own. 0, or a negative -error_t.
+ */
+typedef struct {
+    uint32_t    Number;
+    bool        Home;       /* the volume the machine was booted from */
+    bool        Mounted;    /* its files are found; the numbers below are its */
+    bool        ReadOnly;   /* it takes no change */
+    bool        Away;       /* its medium left, and the volume waits for it */
+    bool        Removable;  /* on a removable medium */
+    uint8_t     Uuid[16];
+    uint64_t    Bytes;
+    uint64_t    FreeBytes;
+    uint64_t    Files;
+    const char *Name;       /* the name a person gave it, "" when nobody has */
+    const char *Medium;     /* what its medium calls itself */
+} VolumeListed;
+int volume_list(VolumeListed **out, size_t *count);
+int volume_info(uint32_t number, VolumeListed **out);
+static inline uint32_t volume_of(file_id_t file)
+{
+    return (uint32_t)((file >> STORAGE_VOLUME_FILE_SHIFT) & 0x7FFFu);
+}
 /* The files that wear every tag of `tags` (every file, for NULL or "") and
  * none of `without` (a comma list too; NULL or "" sets nothing aside). The
  * volume sets aside no file of its own accord but the deleted ones — which
