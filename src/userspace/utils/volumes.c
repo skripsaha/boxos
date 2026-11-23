@@ -141,7 +141,7 @@ static int volumes_new(const char *at)
     } else if (!p) {
         printf("Disk %u has no partition in entry %u\n", seat, entry);
     } else if (p->Kind != DISK_PART_BOXOS) {
-        printf("Entry %u of disk %u is %s partition, not BoxOS's: `disks %u add boxos` lays one\n", entry, seat,
+        printf("Entry %u of disk %u is %s, not BoxOS's — `disks %u add boxos` lays one\n", entry, seat,
                DiskKindName((DiskPartKind)p->Kind), seat);
     } else if (p->Mounted) {
         printf("A volume of the house stands on entry %u of disk %u: no volume is laid over it\n", entry, seat);
