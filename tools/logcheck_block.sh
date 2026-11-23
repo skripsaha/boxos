@@ -49,7 +49,7 @@ block4096_held() {
     chk $? "block4096 ($tag): Gangway reads the volume in the stick's 4096-byte blocks"
     grep -aqE "\[USB disk [0-9]+\] addressed in 4096-byte blocks" "$L"
     chk $? "block4096 ($tag): the kernel seats the stick with its block"
-    grep -aqE "\[Ground\] seat [0-9]+: its table is written in 4096-byte blocks" "$L"
+    grep -aqE "\[DiskTable\] seat [0-9]+: its table is written in 4096-byte blocks" "$L"
     chk $? "block4096 ($tag): and reads its table in it"
     grep -aqE "\[TagFS\] the volume on seat [0-9]+ is MOUNTED" "$L"
     chk $? "block4096 ($tag): the volume on it is mounted"

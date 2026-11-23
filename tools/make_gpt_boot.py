@@ -45,8 +45,8 @@ STAGE2_SECTORS = 16
 
 STAGE2_LBA_FIELD = 432        # the field in stage1, see src/boot/stage1/stage1.asm
 
-# Permanent, never reissued — the same sixteen bytes ground.c, gangway_medium.c and
-# stage2.asm each compare against.
+# Permanent, never reissued — the same sixteen bytes as boxos_disks.h (DISK_TYPE_BOXOS),
+# which the kernel and Gangway compare against, and stage2.asm.
 BOXOS_TYPE = uuid.UUID('cf8ae49a-d26a-4959-9a6f-71c932e0c9eb')
 ESP_TYPE = uuid.UUID('c12a7328-f81f-11d2-ba4b-00a0c93ec93b')
 # The one GRUB uses for the same job, so a partitioning tool that meets this
@@ -93,12 +93,17 @@ def main():
         return 1
 
     src = open(sys.argv[1], 'rb').read()
-    total = len(src) // SECTOR
-    if total < STAGE2_LBA + STAGE2_SECTORS + GPT_ARRAY_SECTORS:
+    if len(src) // SECTOR < STAGE2_LBA + STAGE2_SECTORS + GPT_ARRAY_SECTORS:
         print('the source image is shorter than a GPT disk can be')
         return 1
 
-    disk = bytearray(src)
+    # The volume runs to the last sector of the source, and a GPT keeps its
+    # far copy in the last blocks of the disk: the disk is the source and the
+    # room for that copy after it, so no copy of the table lies over the
+    # volume's own far end — and the volume lies inside the blocks the table
+    # says may be used, which is the only place a reader stands on.
+    disk = bytearray(src) + bytearray((GPT_ARRAY_SECTORS + 1) * SECTOR)
+    total = len(disk) // SECTOR
 
     # ── the protective MBR ────────────────────────────────────────────────
     # stage1's code is kept: the firmware still loads and runs it. What it

@@ -11,9 +11,11 @@
  * medium, because that is not a volume's business: it is the medium that is
  * divided, and the division is written in the medium's own partition table.
  *
- * This is what reads that table. It answers one question — "where on this
- * medium is ground claimed for BoxOS?" — and answers it the same way whether
- * the table is an MBR or a GPT, because the answer is the same kind of fact.
+ * This answers one question of that table — "where on this medium is ground
+ * claimed for BoxOS?" — the same way whether the table is an MBR or a GPT,
+ * because the answer is the same kind of fact. The table itself is read whole
+ * by DiskTable (disk_table.h), the one reader of it in the kernel; the ground
+ * is its BoxOS partitions.
  *
  * Before it, nothing in the kernel read a partition table at all. The volume
  * was assumed to begin at sector 1034 of the whole device, so BoxOS could
@@ -49,11 +51,9 @@ typedef struct {
  * that does not check out, or a table with nothing of ours in it are all
  * "there is no BoxOS ground here", and each says so on its own line.
  *
- * ‼ Asked twice of the same occupant of the same seat, this answers the second
- * time from what it read the first — the table is on the medium and nothing in
- * this kernel writes one. A medium that leaves and comes back is a different
- * occupant of the chair and is read again. Anything that ever DOES write a
- * partition table has to drop that memory; ground.c says where.
+ * Asked twice of the same occupant of the same seat, this answers the second
+ * time from what DiskTable remembered of the first — until DiskTable's own
+ * writer changes the table and lets that memory go.
  *
  * Except a survey the medium REFUSED: its zero is not an answer, is not
  * remembered, and raises `refused` (NULL when the caller does not ask) — the

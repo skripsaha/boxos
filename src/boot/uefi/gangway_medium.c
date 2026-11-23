@@ -6,6 +6,7 @@
  */
 
 #include "gangway.h"
+#include "boxos_disks.h"
 
 /* =========================================================================
  * Block IO: read sectors from disk
@@ -51,12 +52,8 @@ static uint64_t g_ground_start = 0;
 #define GPT_ENTRY_MIN_BYTES     128U
 #define GPT_ARRAY_MAX_BYTES     (64U * 1024U)
 
-/* cf8ae49a-d26a-4959-9a6f-71c932e0c9eb, in the order GPT stores a type GUID —
- * the same sixteen bytes ground.c compares against. */
-static const uint8_t g_boxos_type_guid[16] = {
-    0x9a, 0xe4, 0x8a, 0xcf, 0x6a, 0xd2, 0x59, 0x49,
-    0x9a, 0x6f, 0x71, 0xc9, 0x32, 0xe0, 0xc9, 0xeb
-};
+/* The type that marks BoxOS ground, as the kernel's DiskTable knows it. */
+static const uint8_t g_boxos_type_guid[16] = DISK_TYPE_BOXOS;
 
 static const uint8_t g_deed_magic[8] = {
     VOLUME_DEED_MAGIC_0, VOLUME_DEED_MAGIC_1, VOLUME_DEED_MAGIC_2,

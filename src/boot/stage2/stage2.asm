@@ -2932,7 +2932,8 @@ gpt_cand_last:          dq 0
 ; The BoxOS partition type, cf8ae49a-d26a-4959-9a6f-71c932e0c9eb, in the
 ; mixed-endian order GPT stores a type GUID in — which is the order it appears
 ; on the medium, and therefore the order to compare in. The same sixteen bytes
-; the kernel's ground.c and the UEFI loader carry; permanent, never reissued.
+; boxos_disks.h gives the kernel and the UEFI loader (DISK_TYPE_BOXOS);
+; permanent, never reissued.
 BOXOS_TYPE_GUID_0       equ 0xcf8ae49a
 BOXOS_TYPE_GUID_1       equ 0x4959d26a
 BOXOS_TYPE_GUID_2       equ 0xc9716f9a
