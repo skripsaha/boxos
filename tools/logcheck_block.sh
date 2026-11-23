@@ -78,7 +78,11 @@ run_block4096() {
         bad "block4096: make MEDIUM_BLOCK=4096 does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return
     fi
-    grep -aq "FAT32 ESP of 4096-byte sectors" "$SCRATCH/build.log" &&
+    # The ESP read off the image itself, where its MBR entry says it begins.
+    local esp
+    esp=$(grep -aoE "p[0-9]+: LBA [0-9]+\.\.[0-9]+ of 4096-byte blocks .*type 0xEF" "$SCRATCH/build.log" | head -1 |
+          sed -E 's/.*LBA ([0-9]+)\.\..*/\1/')
+    [ -n "$esp" ] && build/fat --sector 4096 --at "$esp" build/boxos.img open 2>/dev/null | grep -q "^fat: a FAT32 of 4096-byte sectors" &&
         grep -aqE "p1: LBA [0-9]+\.\.[0-9]+ of 4096-byte blocks" "$SCRATCH/build.log"
     chk $? "block4096: the image's ESP is a FAT of 4096-byte sectors and its MBR counts in 4096-byte blocks"
     cp build/boxos.img "$SCRATCH/block4096.stick.img" &&
