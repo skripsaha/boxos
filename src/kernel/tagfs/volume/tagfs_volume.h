@@ -282,6 +282,9 @@ typedef struct {
 } MountState;
 
 struct TagFSVolume {
+    uint32_t              number;           /* its number in the house: 0 the home volume (volume/house.c) */
+    struct TagFSVolume*   next;             /* the one numbered after it, NULL for the last */
+
     TagFSState            state;            /* what it is and its maps: registry, tag index, files (tagfs.h) */
     MountState            mount;            /* its door, its mounting, its medium (above) */
     BookMount             book;             /* its book as the mount read it (mount/book_mount.h) */
@@ -351,9 +354,21 @@ struct TagFSVolume {
     CommonplaceState      commonplace;
 };
 
-/* Every part of `vol` as it begins: a volume taken up is begun once, before
+/* Every part of `vol` as it begins: a volume taken in is begun once, before
  * anything reads or writes it (volume/tagfs_volume.c). */
 void TagFSVolumeBegin(TagFSVolume* vol);
+
+/* The house's own (volume/house.c): the volume of `uuid` met on a medium for
+ * the first time this boot, begun and numbered after the last — NULL when the
+ * machine has no memory for it, or the house no number. */
+TagFSVolume* TagFSVolumeTakeIn(const uint8_t uuid[16]);
+TagFSVolume* TagFSVolumeOfUuid(const uint8_t uuid[16]);
+
+/* What the house asks of each volume (tagfs.c): its service pass, an arrival
+ * attended, the memory a refused mount waited for come back. */
+void TagFSVolumeService(TagFSVolume* vol);
+void TagFSVolumeAttend(TagFSVolume* vol);
+void TagFSVolumeMemoryBack(TagFSVolume* vol);
 
 void MountVolumeBegin(TagFSVolume* vol);
 

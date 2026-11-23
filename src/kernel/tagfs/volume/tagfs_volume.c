@@ -1,21 +1,5 @@
 #include "tagfs_volume.h"
 
-/*
- * The home volume: the one this kernel was booted from, as the loader's pass
- * names it. Until a volume is taken up beside it, it is the only one.
- */
-static TagFSVolume s_home;
-
-TagFSVolume* TagFSHome(void)
-{
-    return &s_home;
-}
-
-void TagFSHomeBegin(void)
-{
-    TagFSVolumeBegin(&s_home);
-}
-
 void TagFSVolumeBegin(TagFSVolume* vol)
 {
     memset(vol, 0, sizeof(*vol));

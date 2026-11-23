@@ -32,7 +32,7 @@ void storage_deck_init(void)
 {
     kprintf("[Storage Deck] Initializing...\n");
 
-    TagFSHomeBegin();
+    TagFSHouseBegin();
 
     /* Listening BEFORE looking. A medium that turns up while the boot mount is
      * running is announced to whoever is subscribed at that moment, so
@@ -55,7 +55,7 @@ void storage_deck_init(void)
         /* One catch-up look. An arrival announced while the boot mount was
          * still running reached a listener that was gated shut by the line
          * above, and nothing would have said it a second time. */
-        TagFSAttendArrival(TagFSHome());
+        TagFSAttendArrival();
         return;
     }
 
@@ -72,4 +72,8 @@ void storage_deck_init(void)
      * knowing which way it might arrive. */
     uint8_t seat = tagfs_get_seat(TagFSHome());
     TouchPublish("volume:mounted", &seat, sizeof(seat));
+
+    /* And every other volume the machine's media carry, taken into the house
+     * and mounted beside it. */
+    TagFSAttendArrival();
 }

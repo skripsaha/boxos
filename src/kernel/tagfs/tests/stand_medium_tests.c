@@ -495,7 +495,7 @@ static TestResult TestStandMediumNeverLeftIsNoReturn(void)
     TEST_ASSERT(!mine, "the file's Helm, free, is not handed to a writer while the medium is away");
     TEST_ASSERT_EQ(s_late.gone, 1, "the writer is answered at once that the medium is away");
 
-    TagFSAttendArrival(vol);
+    TagFSVolumeAttend(vol);
     TEST_ASSERT(StandMountSettles(vol), "the room is searched for its return");
     TEST_ASSERT(TagFSMediumLeft(vol),
                 "and no medium seated before the book opened is judged as it: the book stays open");

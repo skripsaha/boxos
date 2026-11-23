@@ -1,12 +1,19 @@
 #ifndef TAGFS_H
 #define TAGFS_H
 
+#include "../../lib/kernel/ktypes.h"
+
 /* A mounted volume, whole (volume/tagfs_volume.h): handed to every function
- * that touches one. TagFSHome is the volume this kernel was booted from,
- * begun by TagFSHomeBegin before anything of TagFS runs. */
+ * that touches one. The house holds every volume of the machine (volume/
+ * house.c): TagFSHome is the one this kernel was booted from, number 0, and
+ * the rest follow it in the order of their numbers (TagFSVolumeNext, from
+ * NULL). TagFSHouseBegin begins the house before anything of TagFS runs. */
 typedef struct TagFSVolume TagFSVolume;
+void         TagFSHouseBegin(void);
 TagFSVolume* TagFSHome(void);
-void         TagFSHomeBegin(void);
+TagFSVolume* TagFSVolumeNext(TagFSVolume* vol);
+TagFSVolume* TagFSVolumeNumbered(uint32_t number);
+uint32_t     TagFSVolumeNumber(const TagFSVolume* vol);
 
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
@@ -406,9 +413,10 @@ bool     tagfs_handle_is_of_this_mount(TagFSVolume* vol, const TagFSFileHandle* 
  * load per duty when there is nothing to do. Here the work of a Helm handed to
  * a waiter that does it synchronously is run (HelmRunReady), and a volume that
  * has been taken down, which leaves its memory alone until the last caller is
- * out, is finished.
+ * out, is finished — for every volume of the house, and a medium that brought
+ * volumes the house did not hold is searched for them (volume/house.c).
  */
-void     TagFSServiceIfPending(TagFSVolume* vol);
+void     TagFSServiceIfPending(void);
 
 /*
  * The volume's share of the loops (settle/cadence.c). Whether this core's loop
@@ -447,10 +455,10 @@ void     TagFSInkerLeaves(TagFSVolume* vol, struct process_t* proc);
  * context. */
 void     TagFSHeapCameBack(TagFSVolume* vol);
 
-/* The same event for everything on the volume's road that waits for it: the
- * Settle's cycle (TagFSHeapCameBack), and a mount the machine had no memory
- * for, whose service pass is knocked awake. From any context. */
-void     TagFSMemoryCameBack(TagFSVolume* vol);
+/* The same event for everything on every volume's road that waits for it:
+ * the Settle's cycle (TagFSHeapCameBack), and a mount the machine had no
+ * memory for, whose service pass is knocked awake. From any context. */
+void     TagFSMemoryCameBack(void);
 
 /*
  * Where this volume's ground begins on that medium, in the medium's own
@@ -483,7 +491,10 @@ uint64_t tagfs_get_volume_base(TagFSVolume* vol);
  */
 void     TagFSWatchSeats(void);
 
-void     TagFSAttendArrival(TagFSVolume* vol);
+/* The arrivals the room announced while the boot mount ran, attended once it
+ * is settled: by every volume of the house, and the media searched for the
+ * volumes it does not hold. */
+void     TagFSAttendArrival(void);
 
 /* A read of the volume the medium refused — said by the mount's readers, so a
  * mount that fails on a medium that did not answer is asked again when the

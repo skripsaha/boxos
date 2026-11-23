@@ -122,6 +122,14 @@
 /* Every passport carries bit 63, so no passport is a file's id (which a
  * volume gives from 1 up) — the book's TALLY_PASSPORT_BIT. */
 #define TAGFS_PASSPORT_BIT          (1ull << 63)
+/* A file's id as the house names it (volume/house.c): its volume's number in
+ * bits 48..62 and the volume's own id of it below them, so the home volume's
+ * files — number 0 — keep the ids their volume gives. A volume gives no id at
+ * or past TAGFS_VOLUME_FILES_MOST, and the house numbers no volume past
+ * TAGFS_VOLUMES_MOST. */
+#define TAGFS_VOLUME_FILE_BITS      48u
+#define TAGFS_VOLUME_FILES_MOST     ((1ull << TAGFS_VOLUME_FILE_BITS) - 1u)
+#define TAGFS_VOLUMES_MOST          0x7FFFu
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)

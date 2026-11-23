@@ -54,7 +54,7 @@ bool StandMountSettles(TagFSVolume* vol)
     uint8_t  me    = amp_get_core_index();
     for (;;) {
         BoardroomAttendIfPending();
-        TagFSServiceIfPending(vol);
+        TagFSVolumeService(vol);
         if (TagFSStandMountIdle(vol))
             return true;
         if (rdtsc() >= bound)
@@ -114,7 +114,7 @@ void StandMountClose(TagFSVolume* vol, uint8_t seat)
     if (!vol->state.initialized) {
         if (!BoardroomSeatOccupied(seat))
             (void)BoardroomInit();
-        TagFSAttendArrival(vol);
+        TagFSVolumeAttend(vol);
         (void)StandMountSettles(vol);
     }
     TagFSStandHoldAgain(vol);
@@ -426,7 +426,7 @@ TestResult TestStandMediumMountWaitsForMemory(void)
 
     PmmGiveExact(held, STAND_HELD_PAGES);
     held = NULL;
-    TagFSMemoryCameBack(vol);
+    TagFSVolumeMemoryBack(vol);
     TEST_ASSERT(StandMountSettles(vol), "the memory comes back, and what the mount owes is attended");
     TEST_ASSERT(fs->initialized, "the volume is MOUNTED");
     TEST_ASSERT_EQ(tagfs_mount_epoch(vol), epoch + 1u, "once");

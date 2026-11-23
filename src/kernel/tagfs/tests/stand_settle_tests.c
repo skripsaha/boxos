@@ -486,10 +486,10 @@ static bool StandSettleRemount(TagFSVolume* vol)
     bool        let_go = TagFSStandLetGo(vol);
     if (let_go) {
         uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_SETTLE_MOUNT_MS);
-        TagFSAttendArrival(vol);
+        TagFSVolumeAttend(vol);
         while (!(fs->initialized && TagFSStandMountIdle(vol)) && rdtsc() < bound) {
             BoardroomAttendIfPending();
-            TagFSServiceIfPending(vol);
+            TagFSVolumeService(vol);
             BatonPump(amp_get_core_index());
             cpu_pause();
         }

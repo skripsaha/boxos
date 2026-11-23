@@ -257,7 +257,7 @@ void cpu_idle(void) {
      * departure was noticed — that is an interrupt handler or this loop itself,
      * and the caller still inside may be waiting for a transfer this loop is
      * the one to finish. One atomic load when there is nothing to do. */
-    TagFSServiceIfPending(TagFSHome());
+    TagFSServiceIfPending();
 
     /* And the Use Context's verdicts, when one went stale — the recount for
      * cabins that never enter the kernel, which on one core has nowhere else

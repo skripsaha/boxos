@@ -182,7 +182,7 @@ static void mount_knocked(void *ctx)
     KnockOpen(&vol->mount.mount_knock);
 }
 
-void TagFSMemoryCameBack(TagFSVolume* vol)
+void TagFSVolumeMemoryBack(TagFSVolume* vol)
 {
     TagFSHeapCameBack(vol);
     if (__atomic_load_n(&vol->mount.mount_heap_owed, __ATOMIC_ACQUIRE))
@@ -231,21 +231,40 @@ static void search_met_unread(uint8_t *unread, uint8_t seat)
 }
 
 /*
+ * Which volume `vol` stands for. Once it has stood on one, that one and no
+ * other: a volume of the house is its UUID, in whichever seat (volume/house.c).
+ * Before that — the home volume, never yet mounted — the one the loader read
+ * this kernel out of, as the boarding pass names it, preferred and not
+ * required: with that one nowhere, the home volume stands on the first it can
+ * read. *strict says which; false when there is nothing to want either way.
+ */
+static bool volume_wants(TagFSVolume* vol, uint8_t want[16], bool* strict)
+{
+    if (vol->mount.uuid_known) {
+        memcpy(want, vol->mount.uuid, 16);
+        *strict = true;
+        return true;
+    }
+    *strict = false;
+    return BoardingPassVolume(want);
+}
+
+/*
  * Is there a TagFS volume in this seat, and what does it call itself?
  *
  * The magic says it is one of ours. The identity says WHICH one — and that is
- * the question, because the loader read this kernel out of one particular
- * volume and wrote its identity on the boarding pass. A machine carrying two
- * TagFS volumes is not unusual: it is what a machine with BoxOS installed and
- * a BoxOS stick in a socket looks like.
+ * the question: a machine carrying two TagFS volumes is not unusual, it is
+ * what a machine with BoxOS installed and a BoxOS stick in a socket looks
+ * like, and each is a volume of the house (volume_wants). With `any`, the
+ * question is only whether a volume is there at all, whichever it is.
  *
- * `ctx`, when the caller gives one, is where the search keeps the first seat
- * whose medium refused the reads that would have answered (mount.search_unread):
- * the mount that asked is owed, not finished (mount_attempt).
+ * The search keeps the first seat whose medium refused the reads that would
+ * have answered (mount.search_unread): the mount that asked is owed, not
+ * finished (mount_attempt).
  */
-static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
+static bool volume_recognised(TagFSVolume* vol, uint8_t seat, uint8_t out_uuid[16], bool any_volume)
 {
-    uint8_t *unread = (uint8_t *)ctx;
+    uint8_t *unread = &vol->mount.search_unread;
 
     MediumGround ground[GROUND_MAX_PER_MEDIUM];
     bool    refused = false;
@@ -255,14 +274,14 @@ static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
 
     /*
      * A medium may carry more than one BoxOS partition, and then "is there a
-     * volume here" has more than one answer. The one this kernel came out of
-     * is the answer that matters, so the pass is consulted here rather than
-     * only by the Boardroom afterwards — the Boardroom compares one identity
-     * per seat and would otherwise be handed whichever ground happened to be
-     * first in the table.
+     * volume here" has more than one answer. The volume asking is the answer
+     * that matters, so it is consulted here rather than only by the Boardroom
+     * afterwards — the Boardroom compares one identity per seat and would
+     * otherwise be handed whichever ground happened to be first in the table.
      */
     uint8_t want[16];
-    bool    have_pass = BoardingPassVolume(want);
+    bool    strict = false;
+    bool    have_want = !any_volume && volume_wants(vol, want, &strict);
 
     uint8_t first[16];
     bool    any = false;
@@ -281,7 +300,7 @@ static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
             }
         }
 
-        bool wanted = have_pass && memcmp(head.head.uuid, want, 16) == 0;
+        bool wanted = have_want && memcmp(head.head.uuid, want, 16) == 0;
         if (!any) {
             memcpy(first, head.head.uuid, 16);
             any = true;
@@ -294,8 +313,16 @@ static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
         }
     }
 
+    if (strict)
+        return false;
     if (any && out_uuid) memcpy(out_uuid, first, 16);
     return any;
+}
+
+/* The Boardroom's probe of a seat for the volume `ctx` stands for. */
+static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
+{
+    return volume_recognised((TagFSVolume*)ctx, seat, out_uuid, false);
 }
 
 
@@ -320,7 +347,7 @@ static void TagFSProbeDrive(TagFSVolume* vol)
      */
     uint8_t uuid[16];
     vol->mount.search_unread = BOARDROOM_NO_SEAT;
-    vol->mount.seat = BoardroomFindVolume(tagfs_recognise, &vol->mount.search_unread, uuid);
+    vol->mount.seat = BoardroomFindVolume(tagfs_recognise, vol, uuid);
 
     if (vol->mount.seat == BOARDROOM_NO_SEAT) {
         kprintf("[TagFS] no volume found on any of the %u seated medium(s)\n",
@@ -463,17 +490,19 @@ static error_t volume_take_ground(TagFSVolume* vol, uint8_t seat)
     }
 
     uint8_t want[16];
-    bool    have_pass = BoardingPassVolume(want);
+    bool    strict    = false;
+    bool    have_want = volume_wants(vol, want, &strict);
 
     DeedCopy head;
     bool     took          = false;
     bool     unread        = false;   /* a ground whose deeds the medium would not give up */
     uint64_t ground_run    = 0;   /* how far the partition runs, kept past `g` */
 
-    /* Two passes rather than one with a "best so far": the volume named on the
-     * pass is the one this kernel came out of, and taking a different one
-     * because it happened to be listed first is how a machine mounts the
-     * stick it booted next to instead of the stick it booted from. */
+    /* Two passes rather than one with a "best so far": the volume wanted is
+     * the one this volume of the house is, or the one this kernel came out of,
+     * and taking a different one because it happened to be listed first is
+     * how a machine mounts the stick it booted next to instead of the stick it
+     * booted from. A volume that has stood on one takes that one or none. */
     for (int pass = 0; pass < 2 && !took; pass++) {
         for (uint8_t g = 0; g < claimed; g++) {
             DeedCopy candidate;
@@ -487,12 +516,12 @@ static error_t volume_take_ground(TagFSVolume* vol, uint8_t seat)
                 from_tail = true;
             }
 
-            /* With a pass, the first walk takes only the volume it names;
+            /* With a volume wanted, the first walk takes only that one;
              * without one there is nothing to prefer, and the first walk
              * takes the first volume it can read. */
-            bool wanted = have_pass &&
+            bool wanted = have_want &&
                           memcmp(candidate.head.uuid, want, 16) == 0;
-            if (pass == 0 && have_pass && !wanted) {
+            if (pass == 0 && have_want && !wanted) {
                 DeedRelease(&candidate);
                 continue;
             }
@@ -514,7 +543,7 @@ static error_t volume_take_ground(TagFSVolume* vol, uint8_t seat)
                                          ground[g].sectors - 1));
             break;
         }
-        if (!have_pass) break;   /* nothing to prefer; the second pass IS the first */
+        if (!have_want || strict) break;   /* nothing to prefer, or nothing else to take */
     }
 
     if (!took) {
@@ -1110,11 +1139,13 @@ static bool volume_read_again(TagFSVolume* vol, uint8_t seat, uint32_t seating)
         return false;
 
     if (mount_attempt(vol) == OK) {
-        /* Said on every road to a mounted volume: a context this machine
-         * holds is bound to the numbers of the volume that is up now and
-         * told to it; a machine holding none takes up what the volume
-         * remembers. */
-        UseContextRecall();
+        /* Said on every road to the home volume mounted: a context this
+         * machine holds is bound to the numbers of the volume that is up now
+         * and told to it; a machine holding none takes up what the volume
+         * remembers. Another volume of the house carries its memory of a
+         * context and lives by the home volume's. */
+        if (vol == TagFSHome())
+            UseContextRecall();
         return true;
     }
 
@@ -1205,7 +1236,7 @@ static bool TagFSVolumeReturned(TagFSVolume* vol)
     uint8_t seat = vol->mount.seat;
     if (!found && seat != BOARDROOM_NO_SEAT && BoardroomSeatOccupied(seat)) {
         uint32_t seating = BoardroomSeatSeating(seat);
-        if (seating != vol->mount.seating && tagfs_recognise(&vol->mount.search_unread, seat, NULL))
+        if (seating != vol->mount.seating && volume_recognised(vol, seat, NULL, true))
             return volume_book_decided(vol, seat, seating, 0, AWAY_SEAT_TAKEN);
     }
 
@@ -1277,23 +1308,6 @@ bool TagFSStandMountOwed(TagFSVolume* vol)
 #endif
 
 /*
- * A medium arrived. Is there a filesystem for this machine on it?
- *
- * Two ways in, and they are genuinely different questions. If a volume was
- * mounted and its medium left, the only right answer is the one above: that
- * volume and no other. If nothing was ever mounted — a machine that came up
- * with no filesystem at all — then a medium arriving is the first chance it
- * has had, and the whole of the ordinary mount runs, because a mount that has
- * not happened yet is not a special case of anything.
- */
-
-void TagFSBootMountSettled(void)
-{
-    TagFSVolume* vol = TagFSHome();
-    __atomic_store_n(&vol->mount.boot_mount_settled, 1u, __ATOMIC_RELEASE);
-}
-
-/*
  * The medium under this volume may have just left. Ask, and latch if it has.
  *
  * TagFSMediumGone() already knows how to decide and how to say so; what was
@@ -1309,84 +1323,15 @@ void TagFSNoteMediumGone(TagFSVolume* vol)
 }
 
 /*
- * Listening for the medium, instead of being told about it.
+ * A medium arrived. Is there a filesystem for this machine on it?
  *
- * The Boardroom used to call in here by name, which meant a room full of disks
- * had to know that somebody keeps a filesystem on one of them. Now it says
- * seat:taken and seat:emptied and this listens — so the dependency points the
- * way round it should, and anything else that cares about media arriving can
- * care without either side being changed.
- *
- * ‼ AND NOTHING IS DONE ON THE PUBLISHER'S STACK. seat:taken used to mount the
- * volume right here, inside the room's own pass and Touch's delivery of it —
- * and the mount then said volume:mounted, and the autostart that listens for
- * THAT read programs off the medium: two publications deep, four and a half
- * kilobytes of the room's and Touch's frames under the first read, before the
- * medium's own driver and an interrupt landed on what was left. The TouchWatch
- * contract says what belongs on such a stack — note the event and let the loop
- * pick it up — and that is all these do: an arrival is a debt
- * (mount.arrival_owed) attended by the service pass on its own stack
- * (TagFSServiceIfPending), and a seat answering again only knocks the cycle.
+ * Two ways in, and they are genuinely different questions. If a volume was
+ * mounted and its medium left, the only right answer is the one above: that
+ * volume and no other. If nothing was ever mounted — a machine that came up
+ * with no filesystem at all — then a medium arriving is the first chance it
+ * has had, and the whole of the ordinary mount runs, because a mount that has
+ * not happened yet is not a special case of anything.
  */
-static TouchWatch *g_seat_taken_watch   = NULL;
-static TouchWatch *g_seat_emptied_watch = NULL;
-static TouchWatch *g_seat_ready_watch   = NULL;
-
-static void tagfs_on_seat_taken(TouchTag tag, const void *payload,
-                                uint32_t plen, uint32_t source_pid, void *ctx)
-{
-    TagFSVolume* vol = TagFSHome();
-    (void)tag; (void)payload; (void)plen; (void)source_pid; (void)ctx;
-    __atomic_store_n(&vol->mount.arrival_owed, 1u, __ATOMIC_RELEASE);
-}
-
-static void tagfs_on_seat_emptied(TouchTag tag, const void *payload,
-                                  uint32_t plen, uint32_t source_pid, void *ctx)
-{
-    TagFSVolume* vol = TagFSHome();
-    (void)tag; (void)payload; (void)plen; (void)source_pid; (void)ctx;
-    TagFSNoteMediumGone(vol);
-}
-
-/* A seat answers again: a refused cycle looks again, its count moved with the
- * bell. A mount owed is not asked here: the service pass compares the room's
- * count with the one its last attempt ended at (the note over mount.mount_owed) —
- * the announcement of a bell rung while that attempt read comes after the
- * attempt, and is no event of its debt. */
-static void tagfs_on_seat_ready(TouchTag tag, const void *payload,
-                                uint32_t plen, uint32_t source_pid, void *ctx)
-{
-    TagFSVolume* vol = TagFSHome();
-    (void)tag; (void)source_pid; (void)ctx;
-    const BoardroomSeatEvent *ev = payload;
-    if (plen < sizeof(*ev))
-        return;
-    if (vol->state.initialized && ev->first == vol->mount.seat)
-        SettleKnock();
-}
-
-void TagFSWatchSeats(void)
-{
-    if (g_seat_taken_watch) {
-        return;
-    }
-
-    TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
-
-    TouchLogbookResolve("seat:taken", &full, &bare);
-    g_seat_taken_watch = TouchWatchSet(full, tagfs_on_seat_taken, NULL);
-
-    TouchLogbookResolve("seat:emptied", &full, &bare);
-    g_seat_emptied_watch = TouchWatchSet(full, tagfs_on_seat_emptied, NULL);
-
-    TouchLogbookResolve("seat:ready", &full, &bare);
-    g_seat_ready_watch = TouchWatchSet(full, tagfs_on_seat_ready, NULL);
-
-    if (!g_seat_taken_watch || !g_seat_emptied_watch || !g_seat_ready_watch) {
-        kprintf("[TagFS] could not listen for media arriving — a volume that "
-                "turns up later will not be noticed\n");
-    }
-}
 
 /* The body. Whoever calls it holds the one-at-a-time flag above, and this look
  * covers every arrival noted before it. */
@@ -1410,15 +1355,20 @@ static void attend_arrival(TagFSVolume* vol)
     if (mount_attempt(vol) != OK)
         return;
 
-    /* Said on every road to a mounted volume: the Use Context binds its
-     * numbers here, and the person's word stands over the volume's memory. */
+    if (vol != TagFSHome()) {
+        kprintf("[TagFS] volume %u of the house is mounted from seat %u\n", vol->number, vol->mount.seat);
+        return;
+    }
+    /* Said on every road to the home volume mounted: the Use Context binds
+     * its numbers here, and the person's word stands over the volume's
+     * memory; and what waits for the machine's volume hears it. */
     UseContextRecall();
     kprintf("[TagFS] a medium arrived carrying a volume, and this machine "
             "had none — mounted from seat %u\n", vol->mount.seat);
     TouchPublish("volume:mounted", &vol->mount.seat, sizeof(vol->mount.seat));
 }
 
-void TagFSAttendArrival(TagFSVolume* vol)
+void TagFSVolumeAttend(TagFSVolume* vol)
 {
     if (__atomic_load_n(&vol->mount.boot_mount_settled, __ATOMIC_ACQUIRE) == 0) {
         return;
@@ -2101,7 +2051,7 @@ static void tagfs_attend_owed_arrival(TagFSVolume* vol)
  * load per duty when there is nothing to do, which is every iteration but a
  * handful in the life of a machine.
  */
-void TagFSServiceIfPending(TagFSVolume* vol)
+void TagFSVolumeService(TagFSVolume* vol)
 {
     HelmRunReady(vol);
     SettleServiceIfPending(vol);

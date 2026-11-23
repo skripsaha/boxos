@@ -64,10 +64,10 @@
 void StandTallyArrive(TagFSVolume* vol)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_TALLY_MOUNT_MS);
-    TagFSAttendArrival(vol);
+    TagFSVolumeAttend(vol);
     while (!TagFSStandMountIdle(vol) && rdtsc() < bound) {
         BoardroomAttendIfPending();
-        TagFSServiceIfPending(vol);
+        TagFSVolumeService(vol);
         BatonPump(amp_get_core_index());
         cpu_pause();
     }

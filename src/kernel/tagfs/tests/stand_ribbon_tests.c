@@ -68,10 +68,10 @@ StandRibbonRecords* StandRibbonFresh(uint32_t k)
 void StandRibbonArrive(TagFSVolume* vol)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_RIBBON_MOUNT_MS);
-    TagFSAttendArrival(vol);
+    TagFSVolumeAttend(vol);
     while (!TagFSStandMountIdle(vol) && rdtsc() < bound) {
         BoardroomAttendIfPending();
-        TagFSServiceIfPending(vol);
+        TagFSVolumeService(vol);
         BatonPump(amp_get_core_index());
         cpu_pause();
     }
@@ -110,7 +110,7 @@ bool StandRibbonLetGo(TagFSVolume* vol, RibbonCursor* at)
     kprintf("[TESTS] stand_ribbon: a caller is still inside the volume — waited out before it is let go of\n");
     while (rdtsc() < bound) {
         BoardroomAttendIfPending();
-        TagFSServiceIfPending(vol);
+        TagFSVolumeService(vol);
         BatonPump(amp_get_core_index());
         cpu_pause();
         if (!vol->state.initialized && TagFSStandMountIdle(vol))
