@@ -20,7 +20,6 @@
 #define FAT_BAD        0x0FFFFFF7u
 #define FAT_MASK       0x0FFFFFFFu
 #define FAT_RESERVED   32u           /* sectors before the first FAT a FAT32 is laid with, at least */
-#define FAT_CLUSTERS_MOST 0x0FFFFFF4u /* data clusters 2 to 0x0FFFFFF5: past them the FAT's own values */
 #define FAT_SLOT       32u           /* a directory entry */
 #define FAT_DELETED    0xE5u
 #define FAT_LAST_LONG  0x40u         /* the first slot of a long name: its last part */
@@ -774,37 +773,12 @@ int FatOpen(FatVolume* v, const FatMedium* m)
 
 int FatLay(const FatMedium* m, FatVolume* work, uint64_t hidden, const char* label, uint32_t volume_id)
 {
-    uint32_t s = m->sector_bytes;
-    if (s < 512u || s > FAT_SECTOR_MOST || s % 512u)
+    FatLayout l;
+    uint32_t  s = m->sector_bytes;
+    if (!FatShape(m->sectors, s, &l))
         return FAT_TOO_SMALL;
-    /* Microsoft's table, in bytes: a cluster of 512 to 260 MB, 4K to 8 GB,
-     * 8K to 16 GB, 16K to 32 GB, 32K past — never less than a sector. */
-    uint64_t bytes   = m->sectors * s;
-    uint32_t cluster = bytes <= (260ull << 20) ? 512u : bytes <= (8ull << 30) ? 4096u
-                     : bytes <= (16ull << 30) ? 8192u : bytes <= (32ull << 30) ? 16384u : 32768u;
-    uint32_t spc     = cluster < s ? 1u : cluster / s;
-    /* The data region begins on a cluster and on 4 KiB, the physical block
-     * of every disk of 512-byte sectors made since 2011 (UEFI 2.10 §13.3.1.1
-     * asks it aligned to the physical block): the reserved sectors grow to
-     * put it there. */
-    uint32_t align   = spc > 4096u / s ? spc : (4096u / s ? 4096u / s : 1u);
-    uint64_t fat     = 1, clusters = 0, reserved = FAT_RESERVED;
-    for (uint32_t round = 0; round < 64u; round++) {
-        if (m->sectors <= reserved + 2u * fat)
-            return FAT_TOO_SMALL;
-        clusters      = (m->sectors - reserved - 2u * fat) / spc;
-        uint64_t need = ((clusters + 2u) * 4u + s - 1u) / s;
-        uint64_t pad  = (align - (FAT_RESERVED + 2u * need) % align) % align;
-        if (need == fat && reserved == FAT_RESERVED + pad)
-            break;
-        fat      = need;
-        reserved = FAT_RESERVED + pad;
-    }
-    if (clusters < FAT_CLUSTERS_LEAST)
-        return FAT_TOO_SMALL;
-    if (clusters > FAT_CLUSTERS_MOST)
-        clusters = FAT_CLUSTERS_MOST;
-    uint64_t total = reserved + 2u * fat + clusters * spc;
+    uint32_t spc = l.cluster_sectors;
+    uint64_t fat = l.fat_sectors, clusters = l.clusters, reserved = l.reserved, total = l.sectors;
 
     FatVolume* v = work;
     v->medium    = m;

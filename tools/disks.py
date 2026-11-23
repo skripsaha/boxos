@@ -250,15 +250,24 @@ def gpt_lay(m, parts):
 
 # ── the cuts of a change ───────────────────────────────────────────────────
 
+def new_esps(before, after):
+    """The ESPs AFTER's table names that BEFORE's does not: [(first, blocks)]."""
+    was = {(p['first'], p['last']) for p in table_read(before)['parts'] if p['kind'] == 'esp'}
+    return [(p['first'], p['last'] - p['first'] + 1) for p in table_read(after)['parts']
+            if p['kind'] == 'esp' and (p['first'], p['last']) not in was]
+
+
 def regions(before, after):
     """The writes of the change from `before` to `after`, in the kernel's order
-    (disk_table_write.c DiskPlanWrite), by flush: [[(first block, blocks)]]."""
+    (disk_table_write.c DiskEspLaid, then DiskPlanWrite), by flush:
+    [[(first block, blocks)]] — a new ESP's FAT32 first, in free space yet."""
     a = copy_read(after, 1)
     if not a:
         raise SystemExit('cuts: AFTER holds no first copy of a GPT — no change the kernel makes ends so')
     far = copy_read(after, a['alt'])
     array_blocks = (a['count'] * a['entry_bytes'] + after.block - 1) // after.block
-    epochs = [[(far['entry_lba'], array_blocks), (far['header'], 1)], [(a['entry_lba'], array_blocks), (1, 1)]]
+    epochs = [[esp] for esp in new_esps(before, after)]
+    epochs += [[(far['entry_lba'], array_blocks), (far['header'], 1)], [(a['entry_lba'], array_blocks), (1, 1)]]
     if before.get(0) != after.get(0):
         epochs.append([(0, 1)])
     return epochs
@@ -273,6 +282,7 @@ def same(t, u):
 def cuts(before, after):
     old, new = table_read(before), table_read(after)
     epochs = regions(before, after)
+    esps = new_esps(before, after)
     ratio = before.block // SECTOR
     built = bad = 0
     for e, writes in enumerate(epochs):
@@ -292,7 +302,11 @@ def cuts(before, after):
                     m.put(w[0], after.get(w[0], w[1])[:sectors * SECTOR])
                 t = table_read(m)
                 built += 1
-                if not (same(t, old) or same(t, new)):
+                if same(t, new) and any(m.get(f, 1) != after.get(f, 1) for f, _n in esps):
+                    bad += 1
+                    print('cuts: flush %u, landed %s, torn %s at sector %u — the table names an ESP whose FAT32 '
+                          'is not yet there' % (e + 1, landed, w, sectors))
+                elif not (same(t, old) or same(t, new)):
                     bad += 1
                     print('cuts: flush %u, landed %s, torn %s at sector %u — read as %s with %u partition(s), '
                           'neither the old table nor the new' % (e + 1, landed, w, sectors, t['state'], len(t['parts'])))

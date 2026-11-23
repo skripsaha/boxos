@@ -2,6 +2,7 @@
 #include "disk_table_internal.h"
 #include "boardroom.h"
 #include "random.h"
+#include "disk_fat.h"
 #include "volume_deed.h"
 #include "klib.h"
 #include "crypto.h"
@@ -336,6 +337,26 @@ static void DiskNameLay(uint8_t* units, const char* name)
     }
 }
 
+/* An ESP's FAT32 laid on blocks `first` to `first + blocks - 1` of the disk
+ * `t` reads — free space yet: laid before the table names the partition, a
+ * cut leaves the run free with bytes in it no one reads, or an ESP whole. */
+static error_t DiskEspLaid(const DiskTable* t, uint64_t first, uint64_t blocks)
+{
+    DiskFatPlace place;
+    FatVolume*   work = kmalloc(sizeof(FatVolume));
+    if (!work)
+        return ERR_NO_MEMORY;
+    DiskFatPlaced(&place, t->seat, t->seating, first, blocks, t->block_bytes);
+    int rc = FatLay(&place.medium, work, first, NULL, (uint32_t)Random64());
+    kfree(work);
+    if (rc == FAT_OK) {
+        kprintf("[DiskTable] seat %u: a FAT32 laid on blocks %llu..%llu, an ESP's\n", t->seat,
+                (unsigned long long)first, (unsigned long long)(first + blocks - 1u));
+        return OK;
+    }
+    return rc == FAT_TOO_SMALL ? ERR_BUFFER_TOO_SMALL : DiskRefusal(t, "the ESP's FAT32");
+}
+
 error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t first, uint64_t blocks,
                      uint16_t* entry)
 {
@@ -364,6 +385,13 @@ error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t
         rc = ERR_OUT_OF_RANGE;
     }
 
+    if (rc == OK && kind == DISK_PART_ESP && blocks < FatLeastSectors(t.block_bytes)) {
+        kprintf("[DiskTable] seat %u: an ESP is a FAT32, and a FAT32 of %u-byte blocks takes %llu of them at the "
+                "least — %llu is too few\n", seat, t.block_bytes, (unsigned long long)FatLeastSectors(t.block_bytes),
+                (unsigned long long)blocks);
+        rc = ERR_BUFFER_TOO_SMALL;
+    }
+
     DiskPlan p;
     memset(&p, 0, sizeof(p));
     if (rc == OK)
@@ -383,7 +411,10 @@ error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t
         DiskPutLe64(e + GPT_ENTRY_FIRST_OFFSET, first);
         DiskPutLe64(e + GPT_ENTRY_LAST_OFFSET, first + blocks - 1u);
         DiskNameLay(e + GPT_ENTRY_NAME_OFFSET, kind == DISK_PART_ESP ? "EFI system partition" : "BoxOS");
-        rc = DiskPlanWrite(&t, &p, false, "a partition");
+        if (kind == DISK_PART_ESP)
+            rc = DiskEspLaid(&t, first, blocks);
+        if (rc == OK)
+            rc = DiskPlanWrite(&t, &p, false, "a partition");
         if (rc == OK) {
             kprintf("[DiskTable] seat %u: %s %s partition laid in entry %u, blocks %llu..%llu\n", seat,
                     kind == DISK_PART_ESP ? "an" : "a",

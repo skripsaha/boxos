@@ -14,6 +14,8 @@
  *   fat IMG run PATH                              "SECTOR COUNT": the one run of
  *                                                 PATH, counted from the image
  *   fat IMG rm PATH                               PATH taken away
+ *   fat IMG open                                  the FAT32 read, and its layout
+ *                                                 said: nothing written
  *
  * Options before the command: --sector N, the FAT's sector (512, or 4096 for a
  * 4Kn medium); --at N, the sector of IMG the FAT begins at (a partition of a
@@ -103,7 +105,7 @@ static int Usage(void)
 {
     fprintf(stderr, "usage: fat [--sector N] [--at N] [--hidden N] [--time N] IMG "
                     "lay SIZE|least [--label L] [--id N] | put PATH FILE | zeros PATH BYTES | mkdir PATH | "
-                    "get PATH OUT | run PATH | rm PATH\n");
+                    "get PATH OUT | run PATH | rm PATH | open\n");
     return 2;
 }
 
@@ -143,6 +145,12 @@ static int Lay(Image* im, FatMedium* m, int argc, char** argv, uint64_t hidden)
 static int Command(FatVolume* v, const char* cmd, int argc, char** argv, uint64_t at)
 {
     int rc = FAT_OK;
+    if (strcmp(cmd, "open") == 0 && argc == 0) {
+        printf("fat: a FAT32 of %u-byte sectors, %u cluster(s) of %u bytes from sector %llu, %lld free\n",
+               v->sector_bytes, v->clusters, v->cluster_bytes, (unsigned long long)(at + v->data_start),
+               (long long)v->free_count);
+        return 0;
+    }
     if (strcmp(cmd, "put") == 0 && argc == 2) {
         FILE* f = fopen(argv[1], "rb");
         if (!f) {
@@ -189,7 +197,7 @@ static int Command(FatVolume* v, const char* cmd, int argc, char** argv, uint64_
         return Usage();
     }
     if (rc != FAT_OK) {
-        fprintf(stderr, "fat: %s %s: %s\n", cmd, argv[0], Said(rc));
+        fprintf(stderr, "fat: %s %s: %s\n", cmd, argc ? argv[0] : "", Said(rc));
         return 1;
     }
     return 0;

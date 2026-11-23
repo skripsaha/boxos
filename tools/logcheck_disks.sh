@@ -144,11 +144,12 @@ run_disks() {
         if [ -n "$home$d512" ] && [ -n "$d4k" ] && [ -n "$win" ] && [ -n "$dmg" ] && [ -n "$small" ] &&
            cp "$SCRATCH/disks.d512.img" "$SCRATCH/disks.d512.blank" &&
            disks_ask "disks $d512 new" yes && cp "$SCRATCH/disks.d512.img" "$SCRATCH/disks.d512.laid" &&
-           disks_ask "disks $d512 add efi 32M" yes && cp "$SCRATCH/disks.d512.img" "$SCRATCH/disks.d512.esp" &&
+           disks_ask "disks $d512 add efi 64M" yes && cp "$SCRATCH/disks.d512.img" "$SCRATCH/disks.d512.esp" &&
            disks_ask "disks $d512 add boxos" yes &&
            disks_ask "disks $d512 remove 1" yes &&
-           disks_ask "disks $d512 add boxos 100M" yes &&
-           disks_ask "disks $d4k new" yes && disks_ask "disks $d4k add boxos" yes &&
+           disks_ask "disks $d512 add boxos 100M" yes && disks_ask "disks $d512 add efi 20M" &&
+           disks_ask "disks $d4k new" yes && disks_ask "disks $d4k add efi 300M" yes &&
+           disks_ask "disks $d4k add boxos" yes &&
            disks_ask "disks $win add boxos" yes && cp "$SCRATCH/disks.win.img" "$SCRATCH/disks.win.after" &&
            disks_ask "disks $win remove 2" &&
            disks_ask "disks $dmg" && disks_ask "disks $dmg add boxos" &&
@@ -192,8 +193,18 @@ run_disks() {
     disks_holds "$t" 't["state"] == "gpt" and t["copies"] == 0 and [p["kind"] for p in t["parts"]] == ["esp", "boxos"] and t["parts"][1]["last"] - t["parts"][1]["first"] + 1 == 2048 * 96'
     chk $? "disks: the blank stick holds a GPT whose copies agree, an ESP and the BoxOS partition laid again at 100M"
     t=$(disks_read d4k 4096)
-    disks_holds "$t" 't["state"] == "gpt" and t["copies"] == 0 and [p["kind"] for p in t["parts"]] == ["boxos"] and t["parts"][0]["first"] == 256'
-    chk $? "disks: the stick of 4096-byte blocks holds a GPT in its blocks and a BoxOS partition from its first mebibyte"
+    disks_holds "$t" 't["state"] == "gpt" and t["copies"] == 0 and [p["kind"] for p in t["parts"]] == ["esp", "boxos"] and t["parts"][0]["first"] == 256'
+    chk $? "disks: the stick of 4096-byte blocks holds a GPT in its blocks, an ESP from its first mebibyte and a BoxOS partition"
+    for s in "d512 512" "d4k 4096"; do
+        first=$(disks_read "${s% *}" "${s#* }" | python3 -c 'import json, sys
+print(next(p["first"] for p in json.load(sys.stdin)["parts"] if p["kind"] == "esp"))' 2>/dev/null)
+        said=$(build/fat --sector "${s#* }" --at "${first:-0}" "$SCRATCH/disks.${s% *}.img" open 2>&1)
+        [ -n "$first" ] && echo "$said" | grep -q '^fat: a FAT32 of '"${s#* }"'-byte sectors' &&
+            { [ "${s#* }" = 4096 ] || mdir -i "$SCRATCH/disks.${s% *}.img@@$((first * 512))" ::/ >/dev/null 2>&1; }
+        chk $? "disks: the ESP the kernel laid on ${s% *} is a FAT32 of its blocks, read by another reader (${said#fat: })"
+    done
+    disks_said '^An EFI system partition is a FAT32, [0-9.]+ [KMG]B at the least on disk [0-9]+, whose blocks are 512 bytes$' \
+        "an ESP too small for a FAT32 is refused, its least size said"
     t=$(disks_read win) before=$(disks_read "$SCRATCH/disks.win.before")
     python3 -c 'import json, sys
 a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2])

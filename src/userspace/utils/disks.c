@@ -38,6 +38,7 @@
 #include "box/string.h"
 #include "box/error.h"
 #include "box/system.h"
+#include "fat.h"
 
 BOX_FORM("takes optional text \"a disk's number, and new, add, remove, grow or mend\"\n");
 
@@ -240,6 +241,16 @@ static int disks_add(const DiskListed *d, const char *what)
         return 1;
     }
     if (!want) blocks = run->Blocks;
+    /* An ESP is a FAT32 (UEFI 2.10 §13.3.1), and a FAT32 is so many
+     * clusters at the least: the kernel's rule (fat.h), asked first. */
+    uint64_t least = kind == DISK_PART_ESP ? (FatLeastSectors(d->BlockBytes) + grain - 1u) / grain * grain : 0;
+    if (blocks < least) {
+        char most[24];
+        size_shown(disks_bytes(d, least), most, sizeof(most));
+        printf("An EFI system partition is a FAT32, %s at the least on disk %u, whose blocks are %u bytes\n", most,
+               d->Seat, d->BlockBytes);
+        return 1;
+    }
 
     char size[24];
     size_shown(disks_bytes(d, blocks), size, sizeof(size));

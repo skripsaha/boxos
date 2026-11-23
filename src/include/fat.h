@@ -41,6 +41,71 @@
 #define FAT_ATTR_ARCHIVE     0x20u
 #define FAT_ATTR_LONG_NAME   0x0Fu
 
+/* How a FAT32 of `sectors` of `sector_bytes` is laid (FatShape): its
+ * cluster, its reserved sectors — at least 32, grown so the data region
+ * begins on a cluster and on 4 KiB, the physical block of every disk of
+ * 512-byte sectors made since 2011 (UEFI 2.10 §13.3.1.1 asks it on the
+ * physical block) — one FAT's sectors, and its data clusters. */
+typedef struct {
+    uint32_t cluster_sectors;
+    uint32_t reserved;
+    uint32_t fat_sectors;
+    uint32_t clusters;
+    uint64_t sectors;           /* what the FAT32 spans of them */
+} FatLayout;
+
+#define FAT_CLUSTERS_MOST    0x0FFFFFF4u   /* data clusters 2 to 0x0FFFFFF5: past them the FAT's own values */
+
+/* The layout of a FAT32 on `sectors` of `sector_bytes`, its clusters as
+ * large as Microsoft's table sizes them — 512 bytes to 260 MB, 4K to 8 GB,
+ * 8K to 16 GB, 16K to 32 GB, 32K past — never smaller than a sector: 1, or
+ * 0 for too few sectors to hold one. One rule for FatLay and every side that
+ * asks how large an ESP must be. */
+static inline int FatShape(uint64_t sectors, uint32_t sector_bytes, FatLayout* out)
+{
+    uint32_t s = sector_bytes;
+    if (s < 512u || s > FAT_SECTOR_MOST || s % 512u)
+        return 0;
+    uint64_t bytes   = sectors * s;
+    uint32_t cluster = bytes <= (260ull << 20) ? 512u : bytes <= (8ull << 30) ? 4096u
+                     : bytes <= (16ull << 30) ? 8192u : bytes <= (32ull << 30) ? 16384u : 32768u;
+    uint32_t spc     = cluster < s ? 1u : cluster / s;
+    uint32_t align   = spc > 4096u / s ? spc : (4096u / s ? 4096u / s : 1u);
+    uint64_t fat = 1, clusters = 0, reserved = 32u;
+    for (uint32_t round = 0; round < 64u; round++) {
+        if (sectors <= reserved + 2u * fat)
+            return 0;
+        clusters      = (sectors - reserved - 2u * fat) / spc;
+        uint64_t need = ((clusters + 2u) * 4u + s - 1u) / s;
+        uint64_t pad  = (align - (32u + 2u * need) % align) % align;
+        if (need == fat && reserved == 32u + pad)
+            break;
+        fat      = need;
+        reserved = 32u + pad;
+    }
+    if (clusters < FAT_CLUSTERS_LEAST)
+        return 0;
+    if (clusters > FAT_CLUSTERS_MOST)
+        clusters = FAT_CLUSTERS_MOST;
+    out->cluster_sectors = spc;
+    out->reserved        = (uint32_t)reserved;
+    out->fat_sectors     = (uint32_t)fat;
+    out->clusters        = (uint32_t)clusters;
+    out->sectors         = reserved + 2u * fat + clusters * spc;
+    return 1;
+}
+
+/* The fewest sectors of `sector_bytes` a FAT32 is laid on: some 33 MB of
+ * 512-byte sectors, 257 MB of 4096-byte ones. */
+static inline uint64_t FatLeastSectors(uint32_t sector_bytes)
+{
+    FatLayout l;
+    uint64_t  n = FAT_CLUSTERS_LEAST + 32u + 2u * (((uint64_t)FAT_CLUSTERS_LEAST + 2u) * 4u / sector_bytes);
+    while (!FatShape(n, sector_bytes, &l))
+        n++;
+    return n;
+}
+
 /* What a call answers. */
 typedef enum {
     FAT_OK            = 0,
