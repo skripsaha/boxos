@@ -1192,14 +1192,15 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
     proc->cabin->program_fid   = source->FileId;
     proc->cabin->program_owner = loaded.Passport ? loaded.Passport : source->FileId;
     if (source->FileId)
-        memcpy(proc->cabin->program_volume, tagfs_get_state()->uuid, sizeof(proc->cabin->program_volume));
+        TagFSVolumeUuid(source->File->vol, proc->cabin->program_volume);
     /* The card of the program's file keeps who the program is: laid anew when
      * it is another — a program written over with another, signed or not —, as
      * far as the volume takes a change now; one it does not take leaves the
      * program none of its own tags until it does (TagFSHoldsProgram). */
     if (source->FileId)
-        (void)TagFSPassportLay(TagFSHome(), source->FileId, loaded.Passport);
-    ci->program_file     = source->FileId;
+        (void)TagFSPassportLay(source->File->vol, source->FileId, loaded.Passport);
+    /* The program knows its file as every program does: as the house names it. */
+    ci->program_file     = source->FileId ? TagFSHouseId(source->File->vol, source->FileId) : 0;
     ci->image_base       = loaded.ImageBase;
     ci->parts_addr       = loaded.PartsVa;
 

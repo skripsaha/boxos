@@ -104,7 +104,7 @@ static uint64_t autostart_find(const char *name)
  * process, or NULL with the reason already printed — every refusal here names
  * the file it refused, because a machine that silently starts three of four
  * programs is worse than one that starts none. */
-static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
+static process_t *autostart_launch_one(TagFSVolume *vol, uint64_t own, TagFSMetadata *meta,
                                        const char *tags)
 {
     uint64_t file_size = meta->size;
@@ -116,7 +116,7 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
 
     /* The file is read where the loader asks: a box only as far as starting
      * it needs, an image of another kind whole (image_load.h). */
-    TagFSFileHandle *fh = tagfs_open(TagFSHome(), file_id, TAGFS_HANDLE_READ);
+    TagFSFileHandle *fh = tagfs_open(vol, own, TAGFS_HANDLE_READ);
     if (!fh) {
         kprintf("[AUTOSTART] Skip '%s': tagfs_open failed\n", meta->filename);
         return NULL;
@@ -124,14 +124,14 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
 
     process_t *proc = process_create(tags);
     if (!proc) {
-        tagfs_close(TagFSHome(), fh);
+        tagfs_close(vol, fh);
         kprintf("[AUTOSTART] Skip '%s': process_create failed\n", meta->filename);
         return NULL;
     }
 
-    ImageSource source      = { file_size, fh, NULL, file_id };
+    ImageSource source      = { file_size, fh, NULL, own };
     int         load_result = process_load_binary(proc, &source, meta->filename);
-    tagfs_close(TagFSHome(), fh);
+    tagfs_close(vol, fh);
     if (load_result != 0) {
         process_destroy(proc);
         kprintf("[AUTOSTART] Skip '%s': load_binary failed (%d)\n",
@@ -203,11 +203,15 @@ static void AutostartLetRun(AutostartHeld *held)
  * started (said by the launch). The reference is taken before the line names
  * the PID: a kill by that PID cannot free what the walk still holds. A program
  * whose box says rise is watched from here, before it runs (rise.h); `again`
- * says it is a rise's start, not the volume's first. */
+ * says it is a rise's start, not the volume's first. `file_id` is the house's
+ * id of the program's file (TagFSHouseId): the home volume's own, or a file
+ * of another volume a person's start named. */
 static process_t *autostart_consider(uint64_t file_id, bool again)
 {
+    uint64_t      own = 0;
+    TagFSVolume  *vol = TagFSVolumeOfId(file_id, &own);
     TagFSMetadata meta;
-    if (tagfs_get_metadata(TagFSHome(), file_id, &meta) != 0) return NULL;
+    if (!vol || tagfs_get_metadata(vol, own, &meta) != 0) return NULL;
     if (!(meta.flags & TAGFS_FILE_ACTIVE) || (meta.flags & TAGFS_FILE_DELETED)) {
         tagfs_metadata_free(&meta);
         return NULL;
@@ -220,7 +224,7 @@ static process_t *autostart_consider(uint64_t file_id, bool again)
         return NULL;
     }
 
-    process_t *proc = autostart_launch_one(file_id, &meta, tags);
+    process_t *proc = autostart_launch_one(vol, own, &meta, tags);
     if (proc) {
         process_ref_inc(proc);
         RiseWatch(proc, file_id, meta.filename);

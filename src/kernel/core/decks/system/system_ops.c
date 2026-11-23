@@ -1478,18 +1478,18 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
 /* Whether the file is a program: ACTIVE and not deleted, and its bytes are a
  * box or an ELF image (ImageIsProgram) — what it is comes from the file
  * itself, and none of its tags is asked. */
-static bool SysExecCandidate(uint64_t file_id)
+static bool SysExecCandidate(TagFSVolume *vol, uint64_t file_id)
 {
     TagFSMetadata meta;
-    if (tagfs_get_metadata(TagFSHome(), file_id, &meta) != 0) return false;
+    if (tagfs_get_metadata(vol, file_id, &meta) != 0) return false;
 
     bool program = false;
     if ((meta.flags & TAGFS_FILE_ACTIVE) && !(meta.flags & TAGFS_FILE_DELETED) && meta.size != 0) {
-        TagFSFileHandle *fh = tagfs_open(TagFSHome(), file_id, TAGFS_HANDLE_READ);
+        TagFSFileHandle *fh = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
         if (fh) {
             ImageSource source = { meta.size, fh, NULL, file_id };
             program = ImageIsProgram(&source, meta.filename);
-            tagfs_close(TagFSHome(), fh);
+            tagfs_close(vol, fh);
         }
     }
     tagfs_metadata_free(&meta);
@@ -1513,22 +1513,29 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
      * and then one array as long as every id the volume had ever issued. A
      * program the person has deleted is not started by its name: no question
      * meets a file kept deleted (the volume's own state of its record), and
-     * SysExecCandidate asks the record again. */
+     * SysExecCandidate asks the record again. Every volume of the house is
+     * asked, the home volume first: a program the machine's own volume has
+     * is the one its name starts, and a stick carrying one of the same name
+     * starts nothing in its place. */
     uint64_t          page_ids[32];
     TagFSPage         page;
-    uint64_t          from       = 1;
     uint64_t          found_id   = 0;
-    do {
-        error_t asked = TagFSNamedPage(TagFSHome(), TagOwnerPerson(), name, name_len, NULL, 0, NULL, 0, from, page_ids,
-                                       ARRAY_SIZE(page_ids), false, &page);
-        if (asked == ERR_TAGFS_NOT_INITIALIZED) return ERR_FILE_NOT_FOUND;
-        if (asked != OK) return asked;
-        for (uint32_t i = 0; i < page.delivered && found_id == 0; i++) {
-            if (SysExecCandidate(page_ids[i]))
-                found_id = page_ids[i];
-        }
-        from = page.next;
-    } while (found_id == 0 && from != 0);
+    for (TagFSVolume *vol = TagFSVolumeNext(NULL); vol && found_id == 0; vol = TagFSVolumeNext(vol)) {
+        if (!TagFSVolumeMounted(vol))
+            continue;
+        uint64_t from = 1;
+        do {
+            error_t asked = TagFSNamedPage(vol, TagOwnerPerson(), name, name_len, NULL, 0, NULL, 0, from, page_ids,
+                                           ARRAY_SIZE(page_ids), false, &page);
+            if (asked == ERR_TAGFS_NOT_INITIALIZED) break;
+            if (asked != OK) return asked;
+            for (uint32_t i = 0; i < page.delivered && found_id == 0; i++) {
+                if (SysExecCandidate(vol, page_ids[i]))
+                    found_id = TagFSHouseId(vol, page_ids[i]);
+            }
+            from = page.next;
+        } while (found_id == 0 && from != 0);
+    }
 
     if (found_id == 0) return ERR_FILE_NOT_FOUND;
     return SysProcExecFound(op, crates, ctx, found_id, augment, aug_len, luggage, luggage_len);
@@ -1567,8 +1574,10 @@ static int SysProcExecFile(const ManifestOp *op, Crate *crates, uint16_t crate_c
         }
     }
 
-    int rc;
-    if (!SysExecCandidate(file_id))
+    int          rc;
+    uint64_t     own = 0;
+    TagFSVolume *vol = TagFSVolumeOfId(file_id, &own);
+    if (!vol || !SysExecCandidate(vol, own))
         rc = ERR_FILE_NOT_FOUND;
     else
         rc = SysProcExecFound(op, crates, ctx, file_id,
@@ -1581,7 +1590,7 @@ static int SysProcExecFile(const ManifestOp *op, Crate *crates, uint16_t crate_c
 /* The file `found_id`, described by `meta`, read in, made a process wearing
  * `child_tags`, given its Luggage and started. */
 static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            uint64_t found_id, const TagFSMetadata *meta,
+                            TagFSVolume *vol, uint64_t own, uint64_t found_id, const TagFSMetadata *meta,
                             const char *child_tags,
                             const uint8_t *luggage, uint32_t luggage_len)
 {
@@ -1590,20 +1599,20 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
 
     /* The file is read where the loader asks: a box only as far as starting
      * it needs, an image of another kind whole (image_load.h). */
-    TagFSFileHandle *fh = tagfs_open(TagFSHome(), found_id, TAGFS_HANDLE_READ);
+    TagFSFileHandle *fh = tagfs_open(vol, own, TAGFS_HANDLE_READ);
     if (!fh) return ERR_SPAWN_FAILED;
 
     process_t *new_proc = process_create(child_tags);
     if (!new_proc) {
-        tagfs_close(TagFSHome(), fh);
+        tagfs_close(vol, fh);
         return ERR_SPAWN_FAILED;
     }
     new_proc->cabin->spawner_pid = ctx->proc->pid;
     new_proc->cabin->spawner_gen = pid_generation(ctx->proc->pid);
 
-    ImageSource source = { file_size, fh, NULL, found_id };
+    ImageSource source = { file_size, fh, NULL, own };
     error_t     load   = process_load_binary(new_proc, &source, meta->filename);
-    tagfs_close(TagFSHome(), fh);
+    tagfs_close(vol, fh);
     if (load != OK) {
         process_destroy(new_proc);
         return load;
@@ -1663,8 +1672,10 @@ static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext
                             const char *augment, size_t aug_len,
                             const uint8_t *luggage, uint32_t luggage_len)
 {
+    uint64_t      own = 0;
+    TagFSVolume  *vol = TagFSVolumeOfId(found_id, &own);
     TagFSMetadata meta;
-    if (tagfs_get_metadata(TagFSHome(), found_id, &meta) != 0) return ERR_FILE_NOT_FOUND;
+    if (!vol || tagfs_get_metadata(vol, own, &meta) != 0) return ERR_FILE_NOT_FOUND;
 
     char *keys = ProgramKeys(meta.filename, meta.flags);
     if (!keys) {
@@ -1676,7 +1687,7 @@ static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext
     kfree(keys);
     int rc = arc;
     if (arc == OK) {
-        rc = SysProcExecImage(op, crates, ctx, found_id, &meta, child_tags, luggage, luggage_len);
+        rc = SysProcExecImage(op, crates, ctx, vol, own, found_id, &meta, child_tags, luggage, luggage_len);
         kfree(child_tags);
     }
     tagfs_metadata_free(&meta);

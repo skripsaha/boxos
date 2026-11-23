@@ -46,7 +46,7 @@ typedef struct {
     uint64_t                Bytes;    /* the image's length */
     struct TagFSFileHandle *File;     /* opened to read, or NULL ... */
     const uint8_t          *Memory;   /* ... and these bytes instead */
-    uint64_t                FileId;   /* the volume's id of File; 0 with Memory */
+    uint64_t                FileId;   /* File's volume's own id of it (File->vol); 0 with Memory */
 } ImageSource;
 
 /* What a load leaves for the process: where it starts, where the image's

@@ -51,6 +51,10 @@ typedef struct {
 } TagFSVolumeFacts;
 void         TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out);
 
+/* The sixteen bytes volume `vol` calls itself (its Deed's); zeros for the home
+ * volume before it stands on one. */
+void         TagFSVolumeUuid(const TagFSVolume* vol, uint8_t out[16]);
+
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
 #include "tagfs_constants.h"

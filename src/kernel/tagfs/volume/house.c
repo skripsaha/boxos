@@ -55,6 +55,14 @@ bool TagFSVolumeMounted(const TagFSVolume* vol)
     return vol->state.initialized;
 }
 
+void TagFSVolumeUuid(const TagFSVolume* vol, uint8_t out[16])
+{
+    if (vol->mount.uuid_known)
+        memcpy(out, vol->mount.uuid, 16);
+    else
+        memset(out, 0, 16);
+}
+
 void TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out)
 {
     memset(out, 0, sizeof(*out));
