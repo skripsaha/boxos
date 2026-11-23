@@ -110,6 +110,24 @@ static inline DiskPartKind DiskKindOfMbr(uint8_t type)
     }
 }
 
+/* What a partition of `kind` is, in a word or two, as a person is told it. */
+static inline const char* DiskKindName(DiskPartKind kind)
+{
+    switch (kind) {
+    case DISK_PART_BOXOS:            return "BoxOS";
+    case DISK_PART_ESP:              return "EFI system";
+    case DISK_PART_WINDOWS:          return "Windows data";
+    case DISK_PART_WINDOWS_RESERVED: return "Windows reserved";
+    case DISK_PART_WINDOWS_RECOVERY: return "Windows recovery";
+    case DISK_PART_LINUX:            return "Linux";
+    case DISK_PART_LINUX_SWAP:       return "Linux swap";
+    case DISK_PART_LINUX_LVM:        return "Linux LVM";
+    case DISK_PART_BIOS_BOOT:        return "BIOS boot";
+    case DISK_PART_APPLE:            return "Apple";
+    default:                         return "other";
+    }
+}
+
 /* What the table of a disk is in. */
 typedef enum {
     DISK_TABLE_NONE = 0,     /* no table: a blank disk, or one only a whole new table can use */
@@ -165,5 +183,14 @@ typedef enum {
  * and 4Kn medium is built around it, and every partitioning tool of fifteen
  * years uses it. */
 #define DISK_GRAIN_BYTES         (1024u * 1024u)
+
+/* The grain in a disk's own blocks: a mebibyte, or one physical block when
+ * that is larger (`physical_bytes` 0 when the medium would not say). */
+static inline uint64_t DiskGrainBlocks(uint32_t block_bytes, uint32_t physical_bytes)
+{
+    uint64_t grain = DISK_GRAIN_BYTES / block_bytes;
+    uint64_t phys  = physical_bytes > block_bytes ? physical_bytes / block_bytes : 1u;
+    return grain > phys ? grain : phys;
+}
 
 #endif /* BOXOS_DISKS_H */

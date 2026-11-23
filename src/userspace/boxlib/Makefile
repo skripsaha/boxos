@@ -59,6 +59,7 @@ SRCS = src/core/notify.c \
        src/readline.c \
        src/current.c \
        src/file.c \
+       src/disk.c \
        src/use.c \
        src/clipboard.c \
        src/luggage.c \

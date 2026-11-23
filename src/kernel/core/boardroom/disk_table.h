@@ -139,6 +139,4 @@ error_t DiskTableMend(uint8_t seat, uint32_t seating);
  * when that is larger. */
 uint64_t DiskTableGrain(const DiskTable* t);
 
-const char* DiskPartKindName(DiskPartKind kind);
-
 #endif /* DISK_TABLE_H */

@@ -43,28 +43,9 @@ uint64_t DiskLe64(const uint8_t* p)
     return (uint64_t)DiskLe32(p) | ((uint64_t)DiskLe32(p + 4) << 32);
 }
 
-const char* DiskPartKindName(DiskPartKind kind)
-{
-    switch (kind) {
-    case DISK_PART_BOXOS:            return "BoxOS";
-    case DISK_PART_ESP:              return "EFI system";
-    case DISK_PART_WINDOWS:          return "Windows data";
-    case DISK_PART_WINDOWS_RESERVED: return "Windows reserved";
-    case DISK_PART_WINDOWS_RECOVERY: return "Windows recovery";
-    case DISK_PART_LINUX:            return "Linux";
-    case DISK_PART_LINUX_SWAP:       return "Linux swap";
-    case DISK_PART_LINUX_LVM:        return "Linux LVM";
-    case DISK_PART_BIOS_BOOT:        return "BIOS boot";
-    case DISK_PART_APPLE:            return "Apple";
-    default:                         return "other";
-    }
-}
-
 uint64_t DiskTableGrain(const DiskTable* t)
 {
-    uint64_t grain = DISK_GRAIN_BYTES / t->block_bytes;
-    uint64_t phys  = t->physical_bytes > t->block_bytes ? t->physical_bytes / t->block_bytes : 1u;
-    return grain > phys ? grain : phys;
+    return DiskGrainBlocks(t->block_bytes, t->physical_bytes);
 }
 
 /* The medium's blocks [block, block + count) into `buf`. */

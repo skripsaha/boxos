@@ -393,8 +393,9 @@ error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t
         DiskNameLay(e + GPT_ENTRY_NAME_OFFSET, kind == DISK_PART_ESP ? "EFI system partition" : "BoxOS");
         rc = DiskPlanWrite(&t, &p, false, "a partition");
         if (rc == OK) {
-            kprintf("[DiskTable] seat %u: a %s partition laid in entry %u, blocks %llu..%llu\n", seat,
-                    DiskPartKindName(kind), slot, (unsigned long long)first, (unsigned long long)(first + blocks - 1u));
+            kprintf("[DiskTable] seat %u: %s %s partition laid in entry %u, blocks %llu..%llu\n", seat,
+                    kind == DISK_PART_ESP ? "an" : "a",
+                    DiskKindName(kind), slot, (unsigned long long)first, (unsigned long long)(first + blocks - 1u));
             if (entry)
                 *entry = (uint16_t)slot;
         }
@@ -420,7 +421,7 @@ error_t DiskTableRemove(uint8_t seat, uint32_t seating, uint16_t entry, const Di
         rc = ERR_OUT_OF_RANGE;
     else if (rc == OK && part->kind != DISK_PART_BOXOS) {
         kprintf("[DiskTable] seat %u: entry %u is a %s partition — only BoxOS's own are taken away\n", seat, entry,
-                DiskPartKindName(part->kind));
+                DiskKindName(part->kind));
         rc = ERR_INVALID_ARGUMENT;
     } else if (rc == OK && DiskPartUsed(used, part->first)) {
         kprintf("[DiskTable] seat %u: a volume of the house stands on entry %u — it is not taken away\n", seat,

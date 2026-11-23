@@ -943,7 +943,7 @@ UTIL_NAMES = create show files tag untag name trash delete assemble \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple flappybird chess \
              edit seek retag read rollcall handset inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
-             glyphs drawcheck itemcheck benchmark volumes carry
+             glyphs drawcheck itemcheck benchmark volumes carry disks
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1820,7 +1820,8 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/itemcheck.elf "test" \
 	$(UTILS_DIR)/benchmark.elf "" \
 	$(UTILS_DIR)/volumes.elf "" \
-	$(UTILS_DIR)/carry.elf ""
+	$(UTILS_DIR)/carry.elf "" \
+	$(UTILS_DIR)/disks.elf ""
 
 # ‼ EVERY PROGRAM ON THE VOLUME IS A BOX. VOLUME_CONTENT names the programs as
 # the tree links them; each ELF there goes onto the volume as the box tools/pack

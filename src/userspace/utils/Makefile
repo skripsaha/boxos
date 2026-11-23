@@ -74,7 +74,7 @@ UTILS = create show files tag untag name trash delete assemble \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple flappybird chess \
         edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
-        glyphs drawcheck itemcheck benchmark volumes carry
+        glyphs drawcheck itemcheck benchmark volumes carry disks
 
 .PHONY: all clean
 
