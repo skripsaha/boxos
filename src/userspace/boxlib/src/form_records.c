@@ -119,7 +119,8 @@ bool form_yes(const char *question)
 {
     if (!form_person_here()) return false;
     for (;;) {
-        printf("%s (yes or no) ", question);
+        print(question);
+        print(" (yes or no) ");
         char *typed = NULL;
         if (readline_grow(&typed) < 0) {
             println("");
@@ -133,14 +134,15 @@ bool form_yes(const char *question)
         bool no  = strcmp(typed + from, "no") == 0 || strcmp(typed + from, "n") == 0;
         free(typed);
         if (yes || no) return yes;
-        printf("please answer yes or no. ");
+        print("please answer yes or no. ");
     }
 }
 
 char *form_ask(const char *question)
 {
     if (!form_person_here()) return NULL;
-    printf("%s ", question);
+    print(question);
+    print(" ");
     char *typed = NULL;
     if (readline_grow(&typed) < 0) {
         println("");
