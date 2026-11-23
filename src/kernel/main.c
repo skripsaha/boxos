@@ -58,7 +58,7 @@
 #include "hypervisor.h"
 #include "pvclock.h"
 #include "hvclock.h"
-#include "aslr.h"
+#include "random.h"
 #include "memtag.h"
 #include "mce.h"
 #include "op_registry.h"
@@ -645,8 +645,7 @@ void kernel_main(void)
     kprintf("[INIT] Idle Process...\n");
     idle_process_init();
 
-    debug_printf("[INIT] ASLR...\n");
-    aslr_init();
+    RandomInit();
 
     debug_printf("[INIT] Process Management...\n");
     process_init();

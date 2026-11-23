@@ -20,7 +20,6 @@
 #include "pid_allocator.h"
 #include "cpu_caps_page.h"
 #include "fpu.h"
-#include "aslr.h"
 #include "cabin_info.h"
 #include "notify.h"
 #include "touch.h"
@@ -216,7 +215,6 @@ static uint32_t process_note_peak_locked(void)
 
 void process_init(void)
 {
-    aslr_init();
     pid_allocator_init();
 
     process_list_head = NULL;

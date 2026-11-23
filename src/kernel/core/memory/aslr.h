@@ -9,8 +9,7 @@
 // Code (flat binary) stays at CABIN_CODE_START_ADDR — position-dependent.
 // IPC pages (notify/result) stay at fixed addresses — part of the ABI.
 //
-// Entropy source: RDRAND (hardware RNG on modern x86-64).
-// Fallback: TSC-based PRNG for older CPUs without RDRAND.
+// Entropy source: the kernel's one (random.h).
 //
 // Randomization ranges (page-aligned):
 //   Stack:    offset 0 .. ASLR_STACK_RANGE  below nominal USER_STACK_TOP
@@ -28,8 +27,6 @@ typedef struct {
     uint64_t heap_offset;       // page-aligned random offset for heap
     uint64_t buf_heap_offset;   // page-aligned random offset for buffer heap
 } aslr_offsets_t;
-
-void aslr_init(void);
 
 // Generate per-process random offsets
 aslr_offsets_t aslr_generate(void);
