@@ -87,7 +87,8 @@ void TagFSVolumeFactsOf(TagFSVolume* vol, TagFSVolumeFacts* out)
             memcpy(out->medium, name, n);
         out->removable = BoardroomSeatKind(seat) == BOARD_USB;
     }
-    out->away = vol->state.initialized && TagFSMediumLeft(vol);
+    out->away     = vol->state.initialized && TagFSMediumLeft(vol);
+    out->put_away = TagFSVolumePutAwayIs(vol);
     if (!tagfs_enter(vol))
         return;
     out->mounted   = true;

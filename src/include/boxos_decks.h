@@ -619,12 +619,22 @@
  * file's name and size are anybody's to see. ERR_OBJECT_NOT_FOUND for a
  * number the house gave none, ERR_DEVICE_NOT_READY for an away volume. */
 #define STORAGE_SHIPPED             0x31
+/* storage.volume.away — the volume numbered by params [u32 volume] put away by
+ * the person's hands (change-tags): every change of it settled on its medium,
+ * then let go of — its files shown by nothing, and taken up again by no
+ * arrival but its medium seated anew. What a stick is ejected by, and a disk
+ * cleared of before it is laid anew. Answered once it is let go of: OK; OK at
+ * once for a volume not mounted; ERR_OBJECT_NOT_FOUND for a number the house
+ * gave none, ERR_BUSY for the home volume, ERR_DEVICE_NOT_READY for one whose
+ * medium is out of the machine — what waits for it is written when it is back. */
+#define STORAGE_VOLUME_AWAY_OP      0x32
 #define STORAGE_VOLUME_LISTED_HEAD  60u     /* a record before its name */
 #define STORAGE_VOLUME_HOME         0x01u   /* flags: the volume the machine was booted from */
 #define STORAGE_VOLUME_MOUNTED      0x02u   /* its book is read and its files are found */
 #define STORAGE_VOLUME_READ_ONLY    0x04u   /* it takes no change: under glass, or its medium refuses writes */
 #define STORAGE_VOLUME_AWAY         0x08u   /* its medium left; its book is held for its return, its files shown by nothing */
 #define STORAGE_VOLUME_REMOVABLE    0x10u   /* its medium is a removable one */
+#define STORAGE_VOLUME_PUT_AWAY     0x20u   /* put away by the person's word (storage.volume.away), not taken up since */
 #define STORAGE_VOLUME_FILE_SHIFT   48u     /* a file id's volume number begins at this bit */
 #define STORAGE_SHOWN_TO_ME         0
 #define STORAGE_SHOWN_BY            1

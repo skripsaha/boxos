@@ -131,6 +131,7 @@ static int volumes_laid(const uint8_t *records, size_t bytes, uint32_t count, Vo
         list[i].ReadOnly  = (flags & STORAGE_VOLUME_READ_ONLY) != 0;
         list[i].Away      = (flags & STORAGE_VOLUME_AWAY) != 0;
         list[i].Removable = (flags & STORAGE_VOLUME_REMOVABLE) != 0;
+        list[i].PutAway   = (flags & STORAGE_VOLUME_PUT_AWAY) != 0;
         list[i].Name      = pen;
         memcpy(pen, r + STORAGE_VOLUME_LISTED_HEAD, name_len);
         pen += name_len;
@@ -358,6 +359,13 @@ int volume_rename(uint32_t number, const char *name)
     memcpy(params + 4, &n, 2);
     if (len) memcpy(params + 6, name, len);
     int rc = MfCall1(DECK_STORAGE, STORAGE_VOLUME_NAME, params, (uint16_t)(6 + len), NULL, 0, NULL, 0, NULL,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
+}
+
+int volume_put_away(uint32_t number)
+{
+    int rc = MfCall1(DECK_STORAGE, STORAGE_VOLUME_AWAY_OP, &number, sizeof(number), NULL, 0, NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
@@ -689,6 +697,13 @@ int query_name_all_everywhere(TagsOf whose, const char *word, const char *tags, 
 int query_all_on(uint32_t volume, TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
     Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL, volume + 1u };
+    return ask_all(&question, out_ids);
+}
+
+int query_all_everywhere_on(uint32_t volume, TagsOf whose, const char *tags, const char *without,
+                            file_id_t **out_ids)
+{
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL, volume + 1u };
     return ask_all(&question, out_ids);
 }
 

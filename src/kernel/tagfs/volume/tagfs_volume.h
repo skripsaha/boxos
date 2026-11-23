@@ -84,6 +84,13 @@ typedef struct {
      * and for the same reason: the place that notices cannot wait. */
     volatile uint32_t abandon_pending;
     bool leaving_said;
+    /* Put away by the person's word (TagFSVolumePutAway): let go of, its
+     * changes settled first, and taken up by no arrival of the medium it was
+     * put away from — the one seated as `away_seating` — but by the medium
+     * seated anew. `putting` is told once the volume is let go of. */
+    volatile uint32_t         put_away;
+    uint32_t                  away_seating;
+    struct VolumePuttingAway* putting;
     /*
      * ‼ A MOUNT THAT DID NOT FINISH, AND WHAT MAKES IT ASK AGAIN.
      *

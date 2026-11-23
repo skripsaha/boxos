@@ -155,6 +155,13 @@ bool form_person_here(void);
  * when the reading ends. */
 bool form_yes(const char *question);
 
+/* A line of text from the person at the screen to `question`, asked as
+ * "QUESTION " and read to its Enter: the line, the spaces round it trimmed,
+ * on the heap — the caller frees it; "" when the person typed nothing. NULL
+ * with nothing asked when nobody is there (form_person_here), or when the
+ * reading ends. */
+char *form_ask(const char *question);
+
 /* The file this program's screen is, when an arrow made it one (`screen #ID`):
  * what it prints is added to that file. 0 when what it prints reaches the
  * person. A program that takes the whole glass asks this first — under an

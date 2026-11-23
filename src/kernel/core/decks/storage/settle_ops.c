@@ -67,6 +67,7 @@ typedef enum {
     SETTLE_OP_CARRY,
     SETTLE_OP_LAY,
     SETTLE_OP_ROOM,
+    SETTLE_OP_AWAY,
 } SettleOpKind;
 
 typedef struct {
@@ -82,11 +83,12 @@ typedef struct {
     Crate*       out;            /* USE, CARRY, LAY: the out crate, inside the staged crates */
     struct CarryCall* carry;     /* CARRY: the carry it waits for, let go with the answer */
     struct LayCall*   lay;       /* LAY: the laying it waits for, let go with the answer */
+    struct AwayCall*  away;      /* AWAY: the putting away it waits for, let go with the answer */
     Crate*       crates_kbuf;    /* the staged crates, released with the answer */
     uint16_t     crate_count;
     uintptr_t    crates_uaddr;
     ManifestOp*  op;             /* ROOM: the op as it was asked, its params with it */
-    HelmWaiter   service;        /* ROOM: where it is asked again */
+    HelmWaiter   service;        /* ROOM, AWAY: where it is asked again */
     error_t      came;           /* ROOM: what the cycle's end answered */
     bool         again;          /* ROOM: asked again, it met room on its way again */
 #ifdef CONFIG_VOLUME_TESTS
@@ -231,6 +233,8 @@ static void SettleOpAnswered(SettleWaiter* w, error_t rc)
         if (s->lay)
             SettleLaySay(s->lay, s->out, vmm);
         answer = rc;
+    } else if (s->kind == SETTLE_OP_AWAY) {
+        answer = rc;
     } else if (s->kind != SETTLE_OP_ROOM) {
         SettleOpSay(s->kind, s->file_id, pid, rc);
     }
@@ -238,6 +242,7 @@ static void SettleOpAnswered(SettleWaiter* w, error_t rc)
     kfree(s->op);
     kfree(s->carry);
     kfree(s->lay);
+    kfree(s->away);
 
 #ifdef CONFIG_VOLUME_TESTS
     if (s->stand) {
@@ -608,6 +613,106 @@ int SettleVolumeLaid(uint8_t seat, uint32_t seating, uint16_t entry, const uint8
         kfree(call);
         SettleOpAnswered(&s->w, rc);
     }
+    return ERR_WOULD_BLOCK;
+}
+
+// ----------------------------------------------------------------------------
+// A volume put away
+// ----------------------------------------------------------------------------
+
+/* A putting away a deck call began (SettleVolumePutAway), and how its end is
+ * answered — the parked program's wait, or the kernel caller's flag. */
+typedef struct AwayCall {
+    VolumePuttingAway putting;
+    SettleOpWait*     parked;     /* the program's; NULL for a caller in the kernel */
+    TagFSVolume*      vol;
+    volatile uint32_t ended;
+} AwayCall;
+
+static void SettleAwayEnded(VolumePuttingAway* p)
+{
+    AwayCall* call = container_of(p, AwayCall, putting);
+    if (call->parked)
+        SettleOpAnswered(&call->parked->w, p->rc);
+    else
+        __atomic_store_n(&call->ended, 1u, __ATOMIC_RELEASE);
+}
+
+/* The putting away begun — or, a mount of the volume being attended, listed
+ * to be begun at the volume's next service point. */
+static void SettleAwayBegin(SettleOpWait* s)
+{
+    error_t rc = TagFSVolumePutAway(s->vol, &s->away->putting);
+    if (rc == ERR_WOULD_BLOCK)
+        HelmReady(s->vol, &s->service);
+    else if (rc != OK)
+        SettleOpAnswered(&s->w, rc);
+}
+
+static void SettleAwayAgain(HelmWaiter* service)
+{
+    SettleAwayBegin(container_of(service, SettleOpWait, service));
+}
+
+/* Every change of the volume settled — the cycle the wait was linked for
+ * over: the putting away begun; refused, the refusal is the answer. */
+static void SettleAwaySettled(SettleWaiter* w, error_t rc)
+{
+    SettleOpWait* s = (SettleOpWait*)w;
+    if (rc != OK)
+        SettleOpAnswered(w, rc);
+    else
+        SettleAwayBegin(s);
+}
+
+int SettleVolumePutAway(TagFSVolume *vol, const OpContext *ctx, Crate *crates)
+{
+    if (vol == TagFSHome())
+        return ERR_BUSY;
+    error_t ready = TagFSVolumeReady(vol);
+    if (ready == ERR_DEVICE_NOT_READY)
+        return ready;
+    AwayCall* call = kmalloc(sizeof(AwayCall));
+    if (!call)
+        return ERR_NO_MEMORY;
+    memset(call, 0, sizeof(AwayCall));
+    call->vol           = vol;
+    call->putting.ended = SettleAwayEnded;
+
+    /* A caller in the kernel has no program to park: it settles the volume
+     * and turns the service points itself until it is let go of. */
+    if (!ctx || !ctx->proc) {
+        error_t rc = ready == OK ? TagFSSettle(vol) : OK;
+        while (rc == OK && (rc = TagFSVolumePutAway(vol, &call->putting)) == ERR_WOULD_BLOCK) {
+            TagFSServiceIfPending();
+            cpu_pause();
+        }
+        while (rc == OK && !__atomic_load_n(&call->ended, __ATOMIC_ACQUIRE)) {
+            TagFSServiceIfPending();
+            cpu_pause();
+        }
+        rc = rc == OK ? call->putting.rc : rc;
+        kfree(call);
+        return rc;
+    }
+    SettleOpWait* s = SettleOpPark(ctx, crates, SETTLE_OP_AWAY, vol, 0, "storage.volume.away");
+    if (!s) {
+        kfree(call);
+        return ERR_NO_MEMORY;
+    }
+    s->away        = call;
+    s->service.run = SettleAwayAgain;
+    call->parked   = s;
+    if (ready != OK || !tagfs_enter(vol)) {
+        SettleAwayBegin(s);         /* not mounted: put away at once */
+        return ERR_WOULD_BLOCK;
+    }
+    error_t now = SettleWaitNow(vol, InkedGen(vol));
+    if (now == ERR_WOULD_BLOCK)
+        SettleWaitLink(vol, &s->w, InkedGen(vol), SettleAwaySettled);
+    tagfs_leave(vol);
+    if (now != ERR_WOULD_BLOCK)
+        SettleAwaySettled(&s->w, now);
     return ERR_WOULD_BLOCK;
 }
 

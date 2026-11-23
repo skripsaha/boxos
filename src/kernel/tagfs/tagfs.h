@@ -45,6 +45,7 @@ typedef struct {
     bool     read_only;
     bool     away;
     bool     removable;
+    bool     put_away;
     uint8_t  uuid[16];
     uint64_t bytes;
     uint64_t free_bytes;
@@ -589,6 +590,25 @@ bool     TagFSMediumGone(TagFSVolume* vol);
  * is refused, and so is a look at one of its files. ERR_TAGFS_NOT_INITIALIZED:
  * not mounted. */
 error_t  TagFSVolumeReady(TagFSVolume* vol);
+
+/*
+ * A volume of the house put away by the person's word — what a stick is
+ * ejected by, and a disk laid anew is cleared of: let go of, nothing written,
+ * once nobody is inside it, and taken up again by no arrival of the medium it
+ * was put away from — seated anew, the medium brings it back as any arrival
+ * does. The caller has settled its changes first (settle_ops.c). OK with the
+ * putting begun, `p->ended` told on the core that lets the volume go, with
+ * p->rc; ERR_BUSY for the home volume, the machine's own; ERR_WOULD_BLOCK
+ * while a mount of it is being attended — asked again. A volume not mounted
+ * is put away at once, `ended` told before the call returns.
+ */
+typedef struct VolumePuttingAway {
+    error_t rc;
+    void  (*ended)(struct VolumePuttingAway* p);
+} VolumePuttingAway;
+error_t  TagFSVolumePutAway(TagFSVolume* vol, VolumePuttingAway* p);
+/* Whether `vol` is put away (TagFSVolumePutAway) and not taken up since. */
+bool     TagFSVolumePutAwayIs(TagFSVolume* vol);
 
 /* Whether the mounted volume takes no write: its medium refused one as
  * protected (RT-18) — DATA PROTECT on USB, an ATA abort on AHCI — or the

@@ -49,7 +49,7 @@ static uint64_t VolumeRecord(uint8_t *kp, uint64_t pos, const VolumeSaid *v)
     if (kp) {
         uint32_t flags = (f->home ? STORAGE_VOLUME_HOME : 0u) | (f->mounted ? STORAGE_VOLUME_MOUNTED : 0u) |
                          (f->read_only ? STORAGE_VOLUME_READ_ONLY : 0u) | (f->away ? STORAGE_VOLUME_AWAY : 0u) |
-                         (f->removable ? STORAGE_VOLUME_REMOVABLE : 0u);
+                         (f->removable ? STORAGE_VOLUME_REMOVABLE : 0u) | (f->put_away ? STORAGE_VOLUME_PUT_AWAY : 0u);
         memcpy(kp + pos, &f->number, 4);
         memcpy(kp + pos + 4, &flags, 4);
         memcpy(kp + pos + 8, f->uuid, 16);
@@ -143,6 +143,18 @@ int ObjVolumeName(const ManifestOp *op, Crate *crates, uint16_t crate_count, con
     TagFSVolume *vol = TagFSVolumeNumbered(param_u32(op, 0));
     if (!vol) return ERR_OBJECT_NOT_FOUND;
     return SettleVolumeNamed(vol, (const char *)op->params + 6, len, ctx, crates);
+}
+
+/* STORAGE_VOLUME_AWAY_OP  params: [u32 number] — the volume put away by the
+ * person's hands (SettleVolumePutAway). */
+int ObjVolumeAway(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+    if (!StoragePersonSays(ctx, true)) return ERR_ACCESS_DENIED;
+    TagFSVolume *vol = TagFSVolumeNumbered(param_u32(op, 0));
+    if (!vol) return ERR_OBJECT_NOT_FOUND;
+    return SettleVolumePutAway(vol, ctx, crates);
 }
 
 /* STORAGE_OBJ_COPY / STORAGE_OBJ_MOVE  params: [u32 volume]; in_crate: the ids. */

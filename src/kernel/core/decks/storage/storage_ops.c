@@ -495,6 +495,8 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_MOVE,     ObjMove,         OP_AUTH_APP, "storage.move"     },
         { STORAGE_VOLUME_LAY,   ObjVolumeLay,    OP_AUTH_APP, "storage.volume.lay" },
         { STORAGE_SHIPPED,      ObjShipped,      OP_AUTH_APP, "storage.shipped"  },
+        /* The person's hands alone put a volume away (storage_volumes.c). */
+        { STORAGE_VOLUME_AWAY_OP, ObjVolumeAway, OP_AUTH_APP, "storage.volume.away" },
         { STORAGE_OBJ_ANCHOR,   ObjAnchor,       OP_AUTH_APP, "storage.anchor"     },
         { STORAGE_OBJ_WRITE_SETTLED, ObjWriteSettled, OP_AUTH_APP, "storage.write.settled" },
         /* Escheat lets a rotten range's files and blocks go for good: system. */

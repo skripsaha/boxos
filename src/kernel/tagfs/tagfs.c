@@ -1361,6 +1361,17 @@ void TagFSNoteMediumGone(TagFSVolume* vol)
  * not happened yet is not a special case of anything.
  */
 
+/* Whether the medium a put-away volume lies on is seated anew since it was
+ * put away: the seat carrying it now taken after the seating it was put away
+ * from. Every taking of a chair gets the next number, so a medium pulled and
+ * put back — in the same seat or another — is a seating of its own. */
+static bool volume_seated_anew(TagFSVolume* vol)
+{
+    uint8_t uuid[16];
+    uint8_t seat = BoardroomFindVolume(tagfs_recognise, vol, uuid);
+    return seat != BOARDROOM_NO_SEAT && BoardroomSeatSeating(seat) != vol->mount.away_seating;
+}
+
 /* The body. Whoever calls it holds the one-at-a-time flag above, and this look
  * covers every arrival noted before it. */
 static void attend_arrival(TagFSVolume* vol)
@@ -1376,6 +1387,15 @@ static void attend_arrival(TagFSVolume* vol)
         if (__atomic_load_n(&vol->mount.door, __ATOMIC_ACQUIRE) == VOLUME_UP)
             TagFSVolumeReturned(vol);
         return;
+    }
+
+    /* Put away by the person's word: taken up by no arrival of the medium it
+     * was put away from — only by that medium seated anew. */
+    if (__atomic_load_n(&vol->mount.put_away, __ATOMIC_ACQUIRE)) {
+        if (!volume_seated_anew(vol))
+            return;
+        __atomic_store_n(&vol->mount.put_away, 0u, __ATOMIC_RELEASE);
+        kprintf("[TagFS] volume %u, put away, is seated anew — taken up again\n", vol->number);
     }
 
     /* Never mounted. tagfs_init only marks itself done at the very end, so a
@@ -2117,12 +2137,53 @@ void TagFSVolumeService(TagFSVolume* vol)
         /* And now it is an ordinary arrival: nothing is mounted, and there may
          * be a medium in the room carrying the volume this machine had. That
          * road already knows how to check it is the same volume and to say
-         * what it did, so it is not written a second time here. */
+         * what it did, so it is not written a second time here — a volume put
+         * away it leaves let go of. */
+        VolumePuttingAway* putting = vol->mount.putting;
+        vol->mount.putting         = NULL;
         attend_arrival(vol);
         TagFSHoldGroundAfterReturn(vol);   /* nothing at all unless HOLDGROUND=on */
+        if (putting) {
+            kprintf("[TagFS] volume %u is put away: let go of, everything of it on its medium — its medium may "
+                    "be pulled out, and seated anew it is taken up again\n", vol->number);
+            putting->rc = OK;
+            putting->ended(putting);
+        }
     }
 
     attending_done(vol);
+}
+
+error_t TagFSVolumePutAway(TagFSVolume* vol, VolumePuttingAway* p)
+{
+    if (vol == TagFSHome())
+        return ERR_BUSY;
+    if (!attending_take(vol))
+        return ERR_WOULD_BLOCK;
+    vol->mount.away_seating = vol->mount.seating;
+    __atomic_store_n(&vol->mount.put_away, 1u, __ATOMIC_RELEASE);
+    if (!vol->state.initialized) {
+        attending_done(vol);
+        kprintf("[TagFS] volume %u is put away; it was not mounted\n", vol->number);
+        p->rc = OK;
+        p->ended(p);
+        return OK;
+    }
+    /* Shut, as a departure shuts it: nobody new comes in, and the service
+     * pass lets it go once the last caller is out (tagfs_abandon), telling
+     * `p` then. */
+    vol->mount.putting = p;
+    if (__atomic_exchange_n(&vol->mount.door, (uint8_t)VOLUME_LEAVING, __ATOMIC_ACQ_REL) == VOLUME_UP)
+        __atomic_store_n(&vol->mount.abandon_pending, 1u, __ATOMIC_RELEASE);
+    attending_done(vol);
+    kprintf("[TagFS] volume %u is being put away: nobody new comes in, and it is let go of once the last caller "
+            "is out\n", vol->number);
+    return OK;
+}
+
+bool TagFSVolumePutAwayIs(TagFSVolume* vol)
+{
+    return __atomic_load_n(&vol->mount.put_away, __ATOMIC_ACQUIRE) != 0;
 }
 
 // ----------------------------------------------------------------------------

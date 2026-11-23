@@ -13,7 +13,8 @@
 # was. The stick is pulled and its book held: its files are shown by nothing
 # — `files` says it is not plugged in, a command given its files or a name
 # only it carries is refused once, naming it, and `volumes` says so — put back
-# and taken up, its files shown again; and the halt makes both durable. A
+# and taken up, its files shown again; then put away by the person's word,
+# pulled and seated anew, and taken up again; and the halt makes both durable. A
 # volume is named by its name as by its number (carry, files ... on,
 # volumes). volume-read finds both volumes consistent, the
 # stick called by its new name, the moved file on it alone with its bytes and
@@ -102,7 +103,15 @@ run_twovolumes() {
        mon_raw "drive_add 0 if=none,id=stick,file=$stick,format=raw" && sleep 1 &&
        mon_raw "device_add usb-storage,drive=stick,id=usbstick" &&
        wait_for_line build/serial.log 'volume 1: the volume is back, in seat' "$WAIT_QUIET_S" && wait_for_prompt &&
-       type_line "files kind:greeting on Holiday photos" && wait_for_prompt; then
+       type_line "files kind:greeting on Holiday photos" && wait_for_prompt &&
+       type_line "volumes Holiday photos away" && wait_for_prompt &&
+       type_line "volumes 1" && wait_for_prompt &&
+       mon_raw "device_del usbstick" && sleep 2 &&
+       mon_raw "drive_add 0 if=none,id=stick,file=$stick,format=raw" && sleep 1 &&
+       mon_raw "device_add usb-storage,drive=stick,id=usbstick" &&
+       wait_for_line build/serial.log 'volume 1, put away, is seated anew' "$WAIT_QUIET_S" &&
+       wait_for_line build/serial.log 'volume 1 of the house is mounted from seat' "$WAIT_QUIET_S" && wait_for_prompt &&
+       type_line "files twovol.note.txt on Holiday photos" && wait_for_prompt; then
         rc=0
     fi
     twovol_halt first || rc=1
@@ -149,6 +158,13 @@ run_twovolumes() {
         "put back, its book is taken up"
     twovol_answer "$L" "files kind:greeting on Holiday photos" | grep -q "^greet.txt "
     chk $? "twovolumes: and its files are shown again"
+    twovol_answer "$L" "volumes Holiday photos away" | grep -q "^Holiday photos is put away: it may be pulled out now$"
+    chk $? "twovolumes: the stick is put away by the person's word, what waited for it written first"
+    twovol_said "$L" '^\[TagFS\] volume 1 is put away: let go of' "the kernel lets it go once nobody is inside"
+    twovol_answer "$L" "volumes 1" | grep -qE "^ +1  Holiday photos — put away: "
+    chk $? "twovolumes: volumes says it is put away"
+    twovol_answer "$L" "files twovol.note.txt on Holiday photos" | grep -q "^twovol.note.txt "
+    chk $? "twovolumes: pulled and seated anew, it is taken up again, its files with it"
     ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|DEFECT' "$L"
     chk $? "twovolumes: no panic, no fault, no defect said"
 

@@ -166,6 +166,7 @@ typedef struct {
     bool        ReadOnly;   /* it takes no change */
     bool        Away;       /* its medium left: the volume waits for it, its files shown by nothing */
     bool        Removable;  /* on a removable medium */
+    bool        PutAway;    /* put away by the person's word (volume_put_away), not taken up since */
     uint8_t     Uuid[16];
     uint64_t    Bytes;
     uint64_t    FreeBytes;
@@ -209,6 +210,13 @@ int volumes_away(const file_id_t *ids, size_t count, size_t *lying, char *out, s
  * negative -error_t — -ERR_TAGFS_NO_SPACE for a name the volume had no room
  * for, the old one kept. */
 int volume_rename(uint32_t number, const char *name);
+/* The volume numbered `number` put away by the person's hands (change-tags in
+ * the box): every change of it written to its medium, then let go of — its
+ * files shown by nothing, its medium free to pull out, and taken up again when
+ * the medium is seated anew. Answered once it is let go of: 0, or a negative
+ * -error_t — -ERR_BUSY for the home volume, -ERR_DEVICE_NOT_READY for one
+ * whose medium is out of the machine. */
+int volume_put_away(uint32_t number);
 /* The `count` files of `ids` carried to the volume numbered `volume` whole —
  * their bytes, name, the person's tags and the programs' own, the programs
  * they show their tags to, a deleted one's term, the program that made them,
@@ -285,6 +293,7 @@ int files_starting_with(const void* bytes, size_t length, file_id_t** out_ids);
  * every volume. -ERR_OBJECT_NOT_FOUND for a number the house gave none,
  * -ERR_DEVICE_NOT_READY for a volume out of the machine. */
 int query_all_on(uint32_t volume, TagsOf whose, const char* tags, const char* without, file_id_t** out_ids);
+int query_all_everywhere_on(uint32_t volume, TagsOf whose, const char* tags, const char* without, file_id_t** out_ids);
 int query_word_all_on(uint32_t volume, TagsOf whose, const char* word, file_id_t** out_ids);
 int files_starting_with_on(uint32_t volume, const void* bytes, size_t length, file_id_t** out_ids);
 /* The files that came with the system on the volume numbered `volume`: every

@@ -137,6 +137,23 @@ bool form_yes(const char *question)
     }
 }
 
+char *form_ask(const char *question)
+{
+    if (!form_person_here()) return NULL;
+    printf("%s ", question);
+    char *typed = NULL;
+    if (readline_grow(&typed) < 0) {
+        println("");
+        return NULL;
+    }
+    size_t from = 0, to = strlen(typed);
+    while (from < to && typed[from] == ' ') from++;
+    while (to > from && typed[to - 1] == ' ') to--;
+    memmove(typed, typed + from, to - from);
+    typed[to - from] = '\0';
+    return typed;
+}
+
 file_id_t form_screen_file(void)
 {
     static volatile uint32_t known;

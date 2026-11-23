@@ -9,6 +9,10 @@
  *                           on — kept in its book, the name goes with it;
  *                           `volumes Photos Фото 2026` renames the one called
  *                           Photos
+ *   volumes Flash away      the volume called Flash put away: what waits to
+ *                           be written to it written, then let go of — its
+ *                           stick may be pulled out, and seated anew it is
+ *                           taken up again
  *   volumes shipped 0       what came with the system on volume 0 — its
  *                           programs, fonts and help, none of the person's
  *                           files — given back as `them`: `carry them 1 copy`
@@ -35,7 +39,7 @@
 #include "box/error.h"
 #include "box/system.h"
 
-BOX_FORM("takes optional text \"a volume's name or number, and the name to give it; or new, a disk, a partition's entry and a name; or shipped and a volume\"\n"
+BOX_FORM("takes optional text \"a volume's name or number, and the name to give it or away; or new, a disk, a partition's entry and a name; or shipped and a volume\"\n"
          "gives things\n");
 
 /* One volume, one line: its number, what it is called, and what stands. */
@@ -48,6 +52,8 @@ static void volumes_say(const VolumeListed *v)
     printf("%3u  %s%s", v->Number, shown, v->Home ? " (home)" : "");
     if (v->Away)
         printf(" — not plugged in: its %llu file(s) show again when it is", (unsigned long long)v->Files);
+    else if (v->PutAway)
+        printf(" — put away: its medium may be pulled out, and seated anew it is taken up again");
     else if (v->Mounted)
         printf(" — %llu file(s), %s free", (unsigned long long)v->Files, free_text);
     else
@@ -196,6 +202,32 @@ static int volumes_new(const char *at)
     return status;
 }
 
+/* `volumes <volume> away`: the volume put away — written, then let go of. */
+static int volumes_put_away(uint32_t number)
+{
+    char          shown[STORAGE_VOLUME_NAME_MOST + 64];
+    VolumeListed *v = NULL;
+    if (volume_info(number, &v) != 0) {
+        printf("There is no volume numbered %u\n", number);
+        return 1;
+    }
+    volume_shown(v, shown, sizeof(shown));
+    bool removable = v->Removable;
+    free(v);
+    printf("Putting %s away: what waits to be written to it is written, and then it is let go of\n", shown);
+    int rc = volume_put_away(number);
+    if (rc != 0) {
+        printf("%s was not put away: %s\n", shown,
+               rc == -ERR_BUSY             ? "the system runs from it"
+               : rc == -ERR_DEVICE_NOT_READY ? "it is not plugged in — plug it in, and what waits for it is written"
+               : rc == -ERR_ACCESS_DENIED  ? "only the person's hands put a volume away"
+                                           : "the volume refused it");
+        return 1;
+    }
+    printf("%s is put away%s\n", shown, removable ? ": it may be pulled out now" : "");
+    return 0;
+}
+
 /* `volumes shipped <number>`: what came with the system on that volume, given
  * back as `them`. */
 static int volumes_shipped(const char *at)
@@ -258,6 +290,11 @@ int main(void)
         return 1;
     }
 
+    if (strcmp(at, "away") == 0) {
+        int rc = volumes_put_away(number);
+        exit(rc);
+        return rc;
+    }
     if (*at) {
         size_t len = strlen(at);
         if (len > STORAGE_VOLUME_NAME_MOST) {

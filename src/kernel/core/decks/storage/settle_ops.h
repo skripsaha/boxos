@@ -62,6 +62,15 @@ int SettleCarried(TagFSVolume *to, const uint64_t *ids, uint32_t count, bool mov
 int SettleVolumeLaid(uint8_t seat, uint32_t seating, uint16_t entry, const uint8_t *name, uint32_t len,
                      const OpContext *ctx, Crate *crates, Crate *out);
 
+/* Volume `vol` put away by the person's word: every change of it settled on
+ * its medium, and then let go of (TagFSVolumePutAway). A program is parked
+ * until it is let go of (ERR_WOULD_BLOCK) and answered OK or the refusal; a
+ * caller in the kernel is answered so in its call. OK at once for a volume
+ * not mounted; ERR_BUSY for the home volume; ERR_DEVICE_NOT_READY for one
+ * whose medium is out of the machine — what waits to be written to it is
+ * written when the medium is back, and only then may it be put away. */
+int SettleVolumePutAway(TagFSVolume *vol, const OpContext *ctx, Crate *crates);
+
 /*
  * A storage deck handler whose operation the volume answered ERR_WOULD_BLOCK —
  * room a Settle cycle gives back, nothing of the operation done — hands it
