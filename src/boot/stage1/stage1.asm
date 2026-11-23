@@ -89,8 +89,13 @@ STAGE2_OFF      equ 0x8000
 ; for, and this is how its address gets here.
 ;
 ; Sixteen bytes before the disk signature at 440. Those eight bytes belong to
-; the boot code by every convention there is, and no tool writes them.
-STAGE2_LBA_OFFSET equ 432
+; the boot code by every convention there is, and no tool writes them. Where
+; they are comes from the build, read out of src/include/boxos_bios_boot.h —
+; the kernel that lays this sector on a disk writes the field by the same
+; number, and a default here would be a second place it is written down.
+%ifndef STAGE2_LBA_OFFSET
+  %error "STAGE2_LBA_OFFSET must come from the build (-DSTAGE2_LBA_OFFSET=...)"
+%endif
 ; How many sectors of stage2 to load. The image build owns this number — it
 ; decides where stage2 is written and where the kernel begins — and passes it
 ; in with -D, so the loader and the layout cannot drift apart. No default:

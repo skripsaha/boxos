@@ -20,6 +20,7 @@
 #include "manifest_auth.h"
 #include "disk_boot.h"
 #include "boxos_esp.h"
+#include "boxos_bios_boot.h"
 #include "tagfs.h"
 #include "boardroom.h"
 #include "disk_table.h"
@@ -301,12 +302,29 @@ int HwDiskBoot(const ManifestOp* op, Crate* crates, uint16_t crate_count, const 
     if (rc != OK)
         return rc;
     a.loader = loader;
+    /* The BIOS loaders, when the volume keeps them: a volume laid before it
+     * kept them starts through UEFI alone. */
+    uint8_t* stage1 = NULL;
+    uint8_t* stage2 = NULL;
+    error_t  kept   = TagFSKeptRead(vol, BIOS_STAGE1_KEPT, BIOS_SECTOR_BYTES, &stage1, &a.stage1_bytes);
+    if (kept == OK)
+        kept = TagFSKeptRead(vol, BIOS_STAGE2_KEPT, DISKS_LOADER_MOST, &stage2, &a.stage2_bytes);
+    if (kept == OK) {
+        a.stage1 = stage1;
+        a.stage2 = stage2;
+    } else if (kept != ERR_FILE_NOT_FOUND) {
+        kfree(loader);
+        kfree(stage1);
+        return kept;
+    }
     TagFSVolumeUuid(vol, a.uuid);
     DiskBootSaid said;
     rc = (int)DiskBootLay(&a, &said);
     kfree(loader);
+    kfree(stage1);
+    kfree(stage2);
     if (rc == OK && op->out_crate != CRATE_INDEX_NONE) {
-        uint8_t answer[4] = { (uint8_t)said.number, (uint8_t)(said.number >> 8), said.option, said.fallback };
+        uint8_t answer[5] = { (uint8_t)said.number, (uint8_t)(said.number >> 8), said.option, said.fallback, said.bios };
         if (crate_write(&crates[op->out_crate], ctx, answer, sizeof(answer)) != OK)
             return ERR_INVALID_ADDRESS;
     }

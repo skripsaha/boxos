@@ -10,7 +10,7 @@ for a gate to hand the machine, and every cut of a change of it judged.
     disks.py lay IMG SIZE [--block N] [--part KIND:SIZE[:NAME]]... [--fill]
         a fresh image of SIZE (K, M, G — binary) with a GPT laid as a
         partitioning tool lays one — 128 entries, partitions from 1 MiB on
-        the grain — KIND one of esp, msr, windows, recovery, linux, boxos;
+        the grain — KIND one of esp, msr, windows, recovery, linux, bios, boxos;
         --fill writes every partition full of bytes its own
     disks.py damage IMG first|far [--block N]
         one copy of its GPT's header zeroed, as a dead block takes it
@@ -50,6 +50,7 @@ KINDS = {
     'msr': uuid.UUID('e3c9e316-0b5c-4db8-817d-f92df00215ae'),
     'recovery': uuid.UUID('de94bba4-06d1-4d40-a16a-bfd50179d6ac'),
     'linux': uuid.UUID('0fc63daf-8483-4772-8e79-3d69d8477de4'),
+    'bios': uuid.UUID('21686148-6449-6e6f-744e-656564454649'),
 }
 KIND_OF = {g.bytes_le: k for k, g in KINDS.items()}
 

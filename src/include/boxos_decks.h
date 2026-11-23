@@ -718,7 +718,8 @@
  * cut or a refusal on the way leaves the old table or the new, whole.
  *   hw.disk.lay     a new GPT over the whole disk, no partition in it —
  *                   never of a disk a volume of the house stands on (ERR_BUSY)
- *   hw.disk.add     params + [u8 kind (DISK_PART_ESP or DISK_PART_BOXOS)]
+ *   hw.disk.add     params + [u8 kind (DISK_PART_ESP, DISK_PART_BOXOS, or
+ *                   DISK_PART_BIOS_BOOT on a medium of 512-byte blocks)]
  *                   [u64 first_block][u64 blocks]: a partition laid inside
  *                   one free run, from its grain; out_crate (optional)
  *                   [u16 entry], the place it took
@@ -734,9 +735,11 @@
  *                   the ESP under BoxOS's own directory, and as its
  *                   removable-media default when the ESP is BoxOS's own; the
  *                   firmware given a boot option naming it and the volume,
- *                   first in its order for `first` 1, last for 0. out_crate
+ *                   first in its order for `first` 1, last for 0; and, on a
+ *                   disk with a BIOS boot partition, the BIOS loaders the
+ *                   volume keeps laid too (boxos_bios_boot.h). out_crate
  *                   (optional) [u16 option][u8 option given][u8 default
- *                   written]. ERR_INVALID_ARGUMENT for an entry that is no ESP
+ *                   written][u8 BIOS loaders laid]. ERR_INVALID_ARGUMENT for an entry that is no ESP
  *                   or a volume not on this disk; ERR_FILE_NOT_FOUND for a
  *                   volume that keeps no loader; ERR_CORRUPTED for an ESP whose
  *                   FAT32 does not read; ERR_TAGFS_NO_SPACE for one with no

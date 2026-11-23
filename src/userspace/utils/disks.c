@@ -11,11 +11,15 @@
  *   disks 1 add boxos            a BoxOS partition over disk 1's largest
  *                                free run; `add boxos 20G` of that size
  *   disks 1 add efi 512M         an EFI system partition of that size
+ *   disks 1 add bios             a BIOS boot partition, a grain long: where
+ *                                a BIOS start's second stage lies, so the
+ *                                disk starts through a BIOS too
  *   disks 1 remove 2             BoxOS's partition in entry 2 taken away
  *   disks 1 boot 0 2             BoxOS made to start from the ESP in entry 0:
  *                                the loader volume 2 keeps put on it, and the
  *                                machine's firmware told of it — first in its
- *                                order if the person says so
+ *                                order if the person says so; on a disk with a
+ *                                BIOS boot partition, a BIOS starts it too
  *   disks 1 grow 2               BoxOS's partition in entry 2 grown into all
  *                                the free space right after it; `grow 2 40G`
  *                                to that size — a volume on it takes the
@@ -46,6 +50,7 @@
 #include "box/error.h"
 #include "box/system.h"
 #include "fat.h"
+#include "boxos_bios_boot.h"
 
 BOX_FORM("takes optional text \"a disk's name or number, and new, add, remove, grow, boot or mend\"\n");
 
@@ -217,8 +222,17 @@ static int disks_add(const DiskListed *d, const char *what)
     } else if (strncmp(rest, "efi", 3) == 0 && (rest[3] == '\0' || rest[3] == ' ')) {
         kind = DISK_PART_ESP;
         rest += 3;
+    } else if (strncmp(rest, "bios", 4) == 0 && (rest[4] == '\0' || rest[4] == ' ')) {
+        kind = DISK_PART_BIOS_BOOT;
+        rest += 4;
     } else {
-        println("A partition laid is boxos or efi: disks <number> add boxos [size], disks <number> add efi <size>");
+        println("A partition laid is boxos, efi or bios: disks <disk> add boxos [size], disks <disk> add efi <size>, "
+                "disks <disk> add bios");
+        return 1;
+    }
+    if (kind == DISK_PART_BIOS_BOOT && d->BlockBytes != BIOS_SECTOR_BYTES) {
+        printf("A BIOS reads %u-byte sectors and disk %u's blocks are %u bytes: it starts through UEFI alone\n",
+               BIOS_SECTOR_BYTES, d->Seat, d->BlockBytes);
         return 1;
     }
     while (*rest == ' ') rest++;
@@ -235,6 +249,8 @@ static int disks_add(const DiskListed *d, const char *what)
     /* The first free run that holds the size, from its start; with no size,
      * the whole of the largest. */
     uint64_t grain  = DiskGrainBlocks(d->BlockBytes, d->PhysicalBytes);
+    if (!want && kind == DISK_PART_BIOS_BOOT)
+        want = grain * d->BlockBytes;    /* a grain: far more than the second stage, and nothing wasted on the grain */
     uint64_t blocks = want ? (want + d->BlockBytes - 1u) / d->BlockBytes : 0;
     blocks          = (blocks + grain - 1u) / grain * grain;
     const DiskFreeListed *run = NULL;
@@ -425,6 +441,9 @@ static int disks_boot(const DiskListed *d, const char *what)
     }
     printf("BoxOS starts from the ESP in entry %u of disk %u%s\n", entry, d->Seat,
            booted.Fallback ? " — its loader is the ESP's default too, the ESP being BoxOS's own" : "");
+    if (booted.Bios)
+        printf("A BIOS starts it too: the second stage in the disk's BIOS boot partition, the boot sector's code "
+               "over its first sector\n");
     if (booted.Given)
         printf("The firmware's boot option %04X starts it, %s\n", booted.Option,
                first ? "first when the machine starts" : "among the others: the firmware's menu offers it");

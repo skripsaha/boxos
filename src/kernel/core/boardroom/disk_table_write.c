@@ -3,6 +3,7 @@
 #include "boardroom.h"
 #include "random.h"
 #include "disk_fat.h"
+#include "boxos_bios_boot.h"
 #include "volume_deed.h"
 #include "klib.h"
 #include "crypto.h"
@@ -357,13 +358,27 @@ static error_t DiskEspLaid(const DiskTable* t, uint64_t first, uint64_t blocks)
     return rc == FAT_TOO_SMALL ? ERR_BUFFER_TOO_SMALL : DiskRefusal(t, "the ESP's FAT32");
 }
 
-error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t first, uint64_t blocks,
-                     uint16_t* entry)
+/* The type and the name a partition laid of `kind` takes in its entry. */
+static const uint8_t* DiskAddType(DiskPartKind kind, const char** name)
 {
     static const uint8_t esp[16]   = DISK_TYPE_ESP;
     static const uint8_t boxos[16] = DISK_TYPE_BOXOS;
+    static const uint8_t bios[16]  = DISK_TYPE_BIOS_BOOT;
+    switch (kind) {
+    case DISK_PART_ESP:       *name = "EFI system partition"; return esp;
+    case DISK_PART_BOXOS:     *name = "BoxOS";                return boxos;
+    case DISK_PART_BIOS_BOOT: *name = "BIOS boot partition";  return bios;
+    default:                  *name = NULL;                   return NULL;
+    }
+}
+
+error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t first, uint64_t blocks,
+                     uint16_t* entry)
+{
     static const uint8_t unused[16] = { 0 };
-    if (kind != DISK_PART_ESP && kind != DISK_PART_BOXOS)
+    const char*          name       = NULL;
+    const uint8_t*       type       = DiskAddType(kind, &name);
+    if (!type)
         return ERR_INVALID_ARGUMENT;
 
     DiskTable t;
@@ -385,6 +400,11 @@ error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t
         rc = ERR_OUT_OF_RANGE;
     }
 
+    if (rc == OK && kind == DISK_PART_BIOS_BOOT && t.block_bytes != BIOS_SECTOR_BYTES) {
+        kprintf("[DiskTable] seat %u: a BIOS reads %u-byte sectors and this medium is addressed in %u-byte blocks — "
+                "no BIOS boot partition is laid on it\n", seat, BIOS_SECTOR_BYTES, t.block_bytes);
+        rc = ERR_INVALID_ARGUMENT;
+    }
     if (rc == OK && kind == DISK_PART_ESP && blocks < FatLeastSectors(t.block_bytes)) {
         kprintf("[DiskTable] seat %u: an ESP is a FAT32, and a FAT32 of %u-byte blocks takes %llu of them at the "
                 "least — %llu is too few\n", seat, t.block_bytes, (unsigned long long)FatLeastSectors(t.block_bytes),
@@ -406,11 +426,11 @@ error_t DiskTableAdd(uint8_t seat, uint32_t seating, DiskPartKind kind, uint64_t
     if (rc == OK) {
         uint8_t* e = p.entries + (uint64_t)slot * p.entry_bytes;
         memset(e, 0, p.entry_bytes);
-        memcpy(e + GPT_ENTRY_TYPE_OFFSET, kind == DISK_PART_ESP ? esp : boxos, 16);
+        memcpy(e + GPT_ENTRY_TYPE_OFFSET, type, 16);
         RandomGuid(e + GPT_ENTRY_UNIQUE_OFFSET);
         DiskPutLe64(e + GPT_ENTRY_FIRST_OFFSET, first);
         DiskPutLe64(e + GPT_ENTRY_LAST_OFFSET, first + blocks - 1u);
-        DiskNameLay(e + GPT_ENTRY_NAME_OFFSET, kind == DISK_PART_ESP ? "EFI system partition" : "BoxOS");
+        DiskNameLay(e + GPT_ENTRY_NAME_OFFSET, name);
         if (kind == DISK_PART_ESP)
             rc = DiskEspLaid(&t, first, blocks);
         if (rc == OK)

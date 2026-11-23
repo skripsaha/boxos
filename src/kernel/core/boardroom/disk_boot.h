@@ -9,6 +9,8 @@
  * ESP under BoxOS's own directory (boxos_esp.h) — and as the removable-media
  * default on an ESP of BoxOS's own alone, never on one another system shares
  * — and the firmware given a boot option for it, naming the volume it boots.
+ * And through a BIOS too, when the disk has a BIOS boot partition: stage2 at
+ * its head and stage1's code over the protective MBR (boxos_bios_boot.h).
  */
 
 typedef struct {
@@ -19,12 +21,17 @@ typedef struct {
     uint32_t       loader_bytes;
     uint8_t        uuid[16];        /* the volume it boots */
     bool           first;           /* the boot option first in BootOrder */
+    const uint8_t* stage1;          /* the BIOS loaders the volume keeps — NULL for none */
+    uint32_t       stage1_bytes;
+    const uint8_t* stage2;
+    uint32_t       stage2_bytes;
 } DiskBootAsk;
 
 typedef struct {
     bool     fallback;              /* the removable-media default written: the ESP is BoxOS's own */
     bool     option;                /* the firmware given a boot option */
     uint16_t number;                /* its Boot#### */
+    bool     bios;                  /* the BIOS loaders laid: a BIOS starts it too */
 } DiskBootSaid;
 
 /*
@@ -35,7 +42,10 @@ typedef struct {
  * read; ERR_TAGFS_NO_SPACE for one with no room; ERR_PERMISSION_DENIED,
  * ERR_WRITE_FAILED, ERR_DEVICE_NOT_READY for a medium that refused or left.
  * A firmware with no runtime services (a BIOS start) is given no option, and
- * the answer is OK with said->option false.
+ * the answer is OK with said->option false. A disk with no BIOS boot
+ * partition, or a volume that keeps no BIOS loaders, is given none of them,
+ * said->bios false; ERR_TAGFS_NO_SPACE for a BIOS boot partition too small
+ * for stage2, ERR_INVALID_STATE for a sector 0 that is no protective MBR.
  */
 error_t DiskBootLay(const DiskBootAsk* a, DiskBootSaid* said);
 

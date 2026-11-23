@@ -952,8 +952,14 @@ UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 # ==== FINAL BINARIES ====
 KERNEL_BIN   = $(BUILDDIR)/kernel.bin
 KERNEL_ELF   = $(BUILDDIR)/kernel.elf
-STAGE1_BIN   = $(BUILDDIR)/stage1.bin
-STAGE2_BIN   = $(BUILDDIR)/stage2.bin
+# The BIOS loaders, named as a volume keeps them (src/include/boxos_bios_boot.h,
+# the one header that owns the names and the place stage1 keeps stage2's
+# address): laid on the image here, and kept by every volume in the system's
+# role, so the kernel lays them on a disk it makes start through a BIOS.
+BiosName           = $(shell sed -n 's/^\#define $(1)  *"\([^"]*\)".*/\1/p' $(SRCDIR)/include/boxos_bios_boot.h)
+BIOS_STAGE2_LBA_AT = $(shell sed -n 's/^\#define BIOS_STAGE2_LBA_AT  *\([0-9]*\)u.*/\1/p' $(SRCDIR)/include/boxos_bios_boot.h)
+STAGE1_BIN   = $(BUILDDIR)/$(call BiosName,BIOS_STAGE1_KEPT)
+STAGE2_BIN   = $(BUILDDIR)/$(call BiosName,BIOS_STAGE2_KEPT)
 IMAGE        = $(BUILDDIR)/boxos.img
 
 # An empty file the volume carries as a fixture (tags: emptyfile, test:forerror).
@@ -1349,9 +1355,9 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.asm | $(BUILDDIR)
 # removed wholesale by clean, which takes them with it.
 -include $(C_OBJS:.o=.d)
 
-$(STAGE1_BIN): $(STAGE1_SRC) | $(BUILDDIR)
+$(STAGE1_BIN): $(STAGE1_SRC) $(SRCDIR)/include/boxos_bios_boot.h | $(BUILDDIR)
 	@echo "Building Stage1..."
-	@$(ASM) $(ASMFLAGS) $(ASM_LAYOUT) $< -o $@
+	@$(ASM) $(ASMFLAGS) $(ASM_LAYOUT) -DSTAGE2_LBA_OFFSET=$(BIOS_STAGE2_LBA_AT) $< -o $@
 	@sz=$$(stat -f%z $@ 2>/dev/null || stat -c%s $@); \
 	if [ "$$sz" != "512" ]; then \
 	    echo "ERROR: stage1.bin is $$sz bytes; the boot sector is exactly 512."; \
@@ -1663,6 +1669,8 @@ $(TESTBIN_EMPTY):
 VOLUME_CONTENT = \
 	$(KERNEL_BIN)   "" \
 	$(GANGWAY_KEPT) "boot" \
+	$(STAGE1_BIN)   "boot" \
+	$(STAGE2_BIN)   "boot" \
 	$(DISPLAY_BIN)  "display" \
 	$(HUB_BIN)      "" \
 	$(PROCA_BIN)    "" \
@@ -1851,6 +1859,9 @@ Box = $(BUILDDIR)/box/$(basename $(notdir $(1))).box
 VOLUME_ELFS  = $(filter %.elf,$(VOLUME_CONTENT))
 VOLUME_BOXES = $(foreach elf,$(VOLUME_ELFS),$(call Box,$(elf)))
 VOLUME_LAID  = $(foreach word,$(VOLUME_CONTENT),$(if $(filter %.elf,$(word)),$(call Box,$(word)),$(word)))
+# The files the system keeps that are no programs: the loaders a volume's maker
+# lays on a disk it makes start (boxos_esp.h, boxos_bios_boot.h).
+VOLUME_SYSTEM = --system $(GANGWAY_KEPT) --system $(STAGE1_BIN) --system $(STAGE2_BIN)
 
 # ‼ WHAT A PROGRAM ASKS FOR is said in its box (the part `asks`, box_reader.h),
 # by whoever makes the box, and is all the authority a program is given beyond
@@ -1907,7 +1918,7 @@ $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
 $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(SCENE_FILES) $(GANGWAY_KEPT) $(TAGFS_TOOL) \
          tools/make_mbr.py $(MEDIUM_BLOCK_MARK)
-	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) --system $(GANGWAY_KEPT) $(VOLUME_LAID)); \
+	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) $(VOLUME_SYSTEM) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
 	START=$$(( $(ESP_START_SECTOR) + $$ESP )); \
@@ -1925,7 +1936,7 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	    $$START,$$GROUND,7f,boot \
 	    $(ESP_START_SECTOR),$$ESP,ef
 	@echo "  Making the volume on it..."
-	@$(TAGFS_TOOL) --block $(MEDIUM_BLOCK) --kernel $(KERNEL_BIN) --system $(GANGWAY_KEPT) $@ $(VOLUME_LAID)
+	@$(TAGFS_TOOL) --block $(MEDIUM_BLOCK) --kernel $(KERNEL_BIN) $(VOLUME_SYSTEM) $@ $(VOLUME_LAID)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
 	@#
 	@# volume-read is the format's second reader, written apart from the tool

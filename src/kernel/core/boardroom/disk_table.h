@@ -114,9 +114,11 @@ typedef struct {
  * and a partition. */
 error_t DiskTableLay(uint8_t seat, uint32_t seating, const DiskInUse* used);
 
-/* A partition of `kind` — DISK_PART_ESP or DISK_PART_BOXOS — over `blocks`
- * from `first`, which begins on the grain inside one free run; `entry` (NULL
- * for none) the place it took. ERR_INVALID_ARGUMENT for another kind;
+/* A partition of `kind` — DISK_PART_ESP, DISK_PART_BOXOS, or DISK_PART_BIOS_BOOT
+ * on a medium of 512-byte blocks — over `blocks` from `first`, which begins on
+ * the grain inside one free run; `entry` (NULL for none) the place it took.
+ * ERR_INVALID_ARGUMENT for another kind, or a BIOS boot partition on a medium
+ * no BIOS reads;
  * ERR_INVALID_STATE for a disk with no GPT; ERR_CORRUPTED for one whose
  * copies are to be mended first; ERR_OUT_OF_RANGE for a run that is not
  * free; ERR_QUOTA_EXCEEDED for a table with no entry left. */

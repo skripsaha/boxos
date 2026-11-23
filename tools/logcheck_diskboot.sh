@@ -8,8 +8,10 @@
 # Gangway's LoadOptions; utility disks).
 #
 # Through OVMF, with the variable store fresh: a blank stick is given a GPT,
-# an ESP — one too small refused with its least size — a BoxOS partition and
-# a volume, and made to start, first in the firmware's order. A second stick,
+# an ESP — one too small refused with its least size — a BoxOS partition, a
+# BIOS boot partition and a volume, and made to start, first in the firmware's
+# order, and through a BIOS too: the second stage in its BIOS boot partition,
+# the boot sector's code over the protective MBR. A second stick,
 # laid on the host as Windows lays a disk — an ESP whose FAT32 carries
 # Windows' loader and its removable-media default — beside a BoxOS partition,
 # is given a volume and made to start, last in the order. An entry that is no
@@ -25,7 +27,10 @@
 # option first in its order; Gangway says the volume it names and starts it —
 # the stick's volume is the home volume, the disk's beside it — and the start
 # is crossing 1 in the stick's ESP, landed. A BIOS start makes the stick start
-# again and gives the firmware no option, said.
+# again and gives the firmware no option, said. And the stick alone, started
+# by a BIOS (SeaBIOS) as the machine's one disk: its boot sector runs the
+# second stage the kernel laid, which finds the volume through the GPT — the
+# stick's volume is the home volume, and the hub greets.
 # ---------------------------------------------------------------------------
 
 # diskboot_stick NAME — the -drive and -device of the stick NAME.
@@ -134,7 +139,8 @@ print(p["last"] - p["first"] + 1)')
         blank=$(disks_number "2 GB") shared=$(disks_number "1 GB")
         if [ -n "$blank" ] && [ -n "$shared" ] &&
            disks_ask "disks $blank new" yes && disks_ask "disks $blank add efi 20M" &&
-           disks_ask "disks $blank add efi 100M" yes && disks_ask "disks $blank add boxos" yes &&
+           disks_ask "disks $blank add efi 100M" yes && disks_ask "disks $blank add boxos 1800M" yes &&
+           disks_ask "disks $blank add bios" yes &&
            disks_ask "volumes new $blank 1 Started" yes && vb=$(lay_laid "$blank") && [ -n "$vb" ] &&
            disks_ask "volumes new $shared 1 Shared" yes && vs=$(lay_laid "$shared") && [ -n "$vs" ] &&
            disks_ask "disks $blank boot 1 $vb" && disks_ask "disks $blank boot 0 $vs" &&
@@ -154,6 +160,10 @@ print(p["last"] - p["first"] + 1)')
         "the blank stick's ESP is BoxOS's own: the loader goes there as its default too, the crossings laid"
     diskboot_said first '\[EFI\] Boot[0-9A-F]{4} "BoxOS" names EFI/BoxOS/gangway.efi on GPT partition 1, first in the boot order' \
         "the firmware is given a boot option for it, first in its order"
+    diskboot_said first '^Disk [0-9]+ has a BIOS boot partition in entry 2$' "the blank stick is given a BIOS boot partition"
+    diskboot_said first '\[DiskBoot\] seat [0-9]+: a BIOS starts BoxOS too — stage2.bin, [0-9]+ sector\(s\), at the head of the BIOS boot partition in entry 2, and the boot sector.s code over the protective MBR, told block [0-9]+' \
+        "and the BIOS loaders the volume keeps laid on it"
+    diskboot_said first '^A BIOS starts it too: ' "disks says a BIOS starts it too"
     diskboot_said first "\\[DiskBoot\\] seat [0-9]+: BoxOS's loader, [0-9]+ bytes, put on the ESP in entry 0 as EFI/BoxOS/gangway.efi — the removable-media default left as it is: the ESP is shared" \
         "the shared stick's ESP is another system's too: its default is left as it is"
     diskboot_said first '\[EFI\] Boot[0-9A-F]{4} "BoxOS" names EFI/BoxOS/gangway.efi on GPT partition 1, last in the boot order' \
@@ -206,5 +216,40 @@ print(p["last"] - p["first"] + 1)')
     diskboot_said bios '^This start knows no firmware to tell \(a BIOS start\): the firmware is not given a boot option$' \
         "a BIOS start gives the firmware no option, and says so"
     diskboot_said bios 'its crossings kept where they were$' "and keeps the crossings the stick holds"
+
+    # On the host: the stick's boot sector is stage1's code, told the BIOS
+    # boot partition's first block, its protective MBR entry and 0x55AA kept;
+    # the partition's head is stage2.
+    python3 - "$SCRATCH/diskboot.blank.img" build/stage1.bin build/stage2.bin <<'PY'
+import json, struct, subprocess, sys
+img, s1, s2 = sys.argv[1:]
+parts = json.loads(subprocess.check_output(["python3", "tools/disks.py", "read", img, "--json"]))["parts"]
+bios = next(p for p in parts if p["kind"] == "bios")
+with open(img, "rb") as f:
+    mbr = f.read(512)
+    f.seek(bios["first"] * 512)
+    head = f.read(len(open(s2, "rb").read()))
+code = open(s1, "rb").read()
+ok = (mbr[:432] == code[:432] and struct.unpack_from("<Q", mbr, 432)[0] == bios["first"]
+      and mbr[446 + 4] == 0xEE and mbr[510:512] == b"\x55\xaa" and head == open(s2, "rb").read())
+sys.exit(0 if ok else 1)
+PY
+    chk $? "diskboot: the stick's boot sector is stage1's code told its BIOS boot partition, the table kept, stage2 at the partition's head"
+
+    # The stick alone, started by a BIOS as the machine's one disk.
+    rc=1
+    make run-stop >/dev/null 2>&1
+    if make run-bg UEFI=off CORES=4 MEM=4G BOOTDISK="$SCRATCH/diskboot.blank.img" \
+            >"$SCRATCH/diskboot.biosalone.run-bg" 2>&1; then
+        wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt && disks_ask "volumes" && rc=0
+    else
+        harness "diskboot (the stick alone, through a BIOS): run-bg would not start: $(tail -1 "$SCRATCH/diskboot.biosalone.run-bg")"
+    fi
+    diskboot_halt biosalone || rc=1
+    [ $rc = 0 ]
+    chk $? "diskboot (the stick alone, through a BIOS): it starts, the hub greets, and the halt ends"
+    diskboot_said biosalone '^  0  Started \(home\) — ' "the stick's volume, laid by the kernel, is the home volume of a BIOS start"
+    ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|DEFECT' "$SCRATCH/serial.diskboot.biosalone.log"
+    chk $? "diskboot (the stick alone): no panic, no fault, no defect said"
     rm -f build/edk2-vars.fd
 }

@@ -233,14 +233,14 @@ int disk_mend(const DiskListed *disk)
 
 int disk_boot(const DiskListed *disk, uint16_t entry, uint32_t volume, bool first, DiskBooted *booted)
 {
-    uint8_t more[7], answer[4] = { 0 };
+    uint8_t more[7], answer[5] = { 0 };
     memcpy(more, &entry, 2);
     memcpy(more + 2, &volume, 4);
     more[6] = first ? 1u : 0u;
     int rc  = disk_changed(HW_DISK_BOOT, disk, more, sizeof(more), answer, sizeof(answer));
     if (rc == 0 && booted)
         *booted = (DiskBooted){ .Option = (uint16_t)(answer[0] | answer[1] << 8), .Given = answer[2] != 0,
-                                .Fallback = answer[3] != 0 };
+                                .Fallback = answer[3] != 0, .Bios = answer[4] != 0 };
     return rc;
 }
 
