@@ -210,13 +210,13 @@ int main(void)
         exit(rc);
         return rc;
     }
-    if (strncmp(text, "new ", 4) == 0) {
-        int rc = volumes_new(text + 4);
+    if (strncmp(text, "new ", 4) == 0 || strcmp(text, "new") == 0) {
+        int rc = volumes_new(text + 3 + (text[3] == ' '));
         exit(rc);
         return rc;
     }
-    if (strncmp(text, "shipped ", 8) == 0) {
-        int rc = volumes_shipped(text + 8);
+    if (strncmp(text, "shipped ", 8) == 0 || strcmp(text, "shipped") == 0) {
+        int rc = volumes_shipped(text + 7 + (text[7] == ' '));
         exit(rc);
         return rc;
     }

@@ -16,7 +16,10 @@
  *
  * A name the shell found no file for among those in use comes as a word, and
  * is looked for among the files kept deleted: the shell's look-up, like a
- * listing, does not meet them.
+ * listing, does not meet them. A file asked for that is not there any more —
+ * `them` of a command before, deleted since — is said once and left out.
+ * What stays is given back as `them`: everything when the person says no,
+ * nothing once everything went.
  *
  * Its exit: 0 when everything asked for went, or the person said no; 1 when
  * something could not go, or nobody was there to be asked.
@@ -32,7 +35,8 @@
 #include "box/system.h"
 
 BOX_FORM("takes optional things \"the files to delete\"\n"
-         "takes optional words \"the name of a file in the trash\"\n");
+         "takes optional words \"the name of a file in the trash\"\n"
+         "gives things\n");
 
 /* How many files are shown before the rest are counted. */
 #define SHOWN_FILES 12u
@@ -132,9 +136,25 @@ static void show_going(const Going *going)
 }
 
 
-/* Each file deleted; one the system keeps stays, and is said. True when every
- * one went. */
-static bool delete_all(const Going *going)
+/* The files asked for that are not there any more left out, and said once. */
+static void going_there(Going *going)
+{
+    size_t kept = 0;
+    for (size_t i = 0; i < going->Count; i++) {
+        FileMetadata metadata;
+        int          rc = FileMetadataRead(MY_TAGS, going->Ids[i], &metadata);
+        if (rc == 0) FileMetadataRelease(&metadata);
+        if (rc == 0 || box_errno_of(rc) != ERR_FILE_NOT_FOUND) going->Ids[kept++] = going->Ids[i];
+    }
+    size_t gone = going->Count - kept;
+    going->Count = kept;
+    if (gone == 1) println("One of them is not there any more");
+    else if (gone > 1) printf("%zu of them are not there any more\n", gone);
+}
+
+/* Each file deleted; one the system keeps stays, and is said — what stays
+ * left in `going`. True when every one went. */
+static bool delete_all(Going *going)
 {
     size_t deleted = 0, stayed = 0;
     for (size_t i = 0; i < going->Count; i++) {
@@ -145,12 +165,13 @@ static bool delete_all(const Going *going)
         if (rc == 0) {
             deleted++;
         } else {
-            stayed++;
+            going->Ids[stayed++] = going->Ids[i];
             if (box_errno_of(rc) == ERR_PERMISSION_DENIED) printf("%s is kept by the system; it stays\n", name);
             else printf("%s could not be deleted (error %d); it stays\n", name, (int)box_errno_of(rc));
         }
         if (named) FileMetadataRelease(&metadata);
     }
+    going->Count = stayed;
     printf("Deleted %zu file%s\n", deleted, deleted == 1 ? "" : "s");
     return stayed == 0;
 }
@@ -186,8 +207,12 @@ int main(void)
     }
     free(trashed);
 
-    int status = whole ? 0 : 1;
-    if (going.Count > 0) {
+    int    status = whole ? 0 : 1;
+    size_t asked  = going.Count;
+    going_there(&going);
+    if (asked > 0 && going.Count == 0) {
+        println("Nothing was deleted: none of them is there any more");
+    } else if (going.Count > 0) {
         show_going(&going);
         if (!form_person_here()) {
             println("delete: nobody is at the screen to say yes, so nothing was deleted");
@@ -198,6 +223,7 @@ int main(void)
             status = 1;
         }
     }
+    souvenir_things(going.Ids, going.Count);
     free(going.Ids);
     exit(status);
     return status;
