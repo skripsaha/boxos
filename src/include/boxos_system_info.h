@@ -82,11 +82,38 @@ typedef struct EfiInfo {
     uint32_t hash_count_by_db[6];
 } EfiInfo;
 
+/* system.machine.info — what the machine calls itself, as its firmware's SMBIOS
+ * table says (DMTF DSP0134; drivers/smbios): System Information's maker,
+ * product, version and family, the board's maker and product, the chassis.
+ * Each text UTF-8 as the firmware wrote it, NUL-ended — empty for a field the
+ * table leaves out, or fills with a vendor's placeholder ("To be filled by
+ * O.E.M.", "Default string", ...), which names no machine. How a person is
+ * told the machine's name is boxlib's (machine_shown). */
+#define MACHINE_TEXT_MOST    64u
+#define MACHINE_FROM_NONE    0u  /* the firmware published no SMBIOS table */
+#define MACHINE_FROM_SMBIOS2 1u  /* the 32-bit entry point, "_SM_" */
+#define MACHINE_FROM_SMBIOS3 2u  /* the 64-bit entry point, "_SM3_" */
+typedef struct MachineInfo {
+    char    maker[MACHINE_TEXT_MOST];        /* type 1: manufacturer */
+    char    product[MACHINE_TEXT_MOST];      /* type 1: product name */
+    char    version[MACHINE_TEXT_MOST];      /* type 1: version */
+    char    family[MACHINE_TEXT_MOST];       /* type 1: family */
+    char    board_maker[MACHINE_TEXT_MOST];  /* type 2: manufacturer */
+    char    board[MACHINE_TEXT_MOST];        /* type 2: product */
+    uint8_t chassis;                         /* type 3: its type, the lock bit off; 0 for none */
+    uint8_t from;                            /* MACHINE_FROM_* */
+    uint8_t major;                           /* the table's version */
+    uint8_t minor;
+    uint8_t _pad[4];
+} MachineInfo;
+
 #ifdef __cplusplus
+static_assert(sizeof(MachineInfo) == 392, "MachineInfo is a kernel/userspace ABI and must stay 392 bytes");
 static_assert(sizeof(SystemInfo) == 96, "SystemInfo is a kernel/userspace ABI and must stay 96 bytes");
 static_assert(sizeof(SystemResources) == 80, "SystemResources is a kernel/userspace ABI and must stay 80 bytes");
 static_assert(sizeof(EfiInfo) == 68, "EfiInfo is a kernel/userspace ABI and must stay 68 bytes");
 #else
+_Static_assert(sizeof(MachineInfo) == 392, "MachineInfo is a kernel/userspace ABI and must stay 392 bytes");
 _Static_assert(sizeof(SystemInfo) == 96, "SystemInfo is a kernel/userspace ABI and must stay 96 bytes");
 _Static_assert(sizeof(SystemResources) == 80, "SystemResources is a kernel/userspace ABI and must stay 80 bytes");
 _Static_assert(sizeof(EfiInfo) == 68, "EfiInfo is a kernel/userspace ABI and must stay 68 bytes");

@@ -144,10 +144,15 @@
 #define SYSTEM_OP_TOUCH_ACK         0x57
 #define SYSTEM_OP_TOUCH_INTERN      0x58  /* tag string -> (full, bare) ids */
 
-/* ─── EFI runtime introspection — read-only (0x60 – 0x62) ──────────── */
+/* ─── Firmware introspection — read-only (0x60 – 0x63) ──────────────── */
 #define SYSTEM_OP_EFI_INFO          0x60
 #define SYSTEM_OP_EFI_ESRT_GET      0x61
 #define SYSTEM_OP_EFI_VERIFY_PE     0x62
+/* system.machine.info — what the machine calls itself (MachineInfo,
+ * boxos_system_info.h), read from its firmware's SMBIOS table: no params;
+ * out_crate one MachineInfo. Every program may ask, as a machine's name is
+ * anybody's to see. */
+#define SYSTEM_OP_MACHINE_INFO      0x63
 
 /* ─── Bay — cross-cabin shared memory (0x70 – 0x72) ────────────────── */
 /* open creates-or-attaches and returns a user-VA pointer; release drops

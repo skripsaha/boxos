@@ -78,6 +78,15 @@ _Static_assert(BOOT_INFO_ADDR == BOOT_INFO_ADDR_FROM_BUILD,
  *                           EfiACPIMemoryNVS — the firmware's own lives in
  *                           EfiBootServicesData, which PMM reclaims after
  *                           EBS. Zero when the firmware published none.
+ *
+ * smbios_copy_phys/size     A Gangway copy of the SMBIOS structure table
+ *                           (DMTF DSP0134), in EfiACPIMemoryNVS for the same
+ *                           reason — UEFI 2.10 §2.3 lets the firmware keep it
+ *                           in EfiBootServicesData — and the version and the
+ *                           entry point it came by (boxos_smbios.h). Zero on a
+ *                           BIOS start, where the kernel finds the entry point
+ *                           in the F-segment itself, and when the firmware
+ *                           published none.
  */
 typedef struct __attribute__((packed))
 {
@@ -110,6 +119,12 @@ typedef struct __attribute__((packed))
     uint32_t efi_cfg_table_count;   /* +116: entries in it */
     uint64_t efi_esrt_copy_phys;    /* +120: NVS-preserved ESRT copy */
     uint32_t efi_esrt_copy_size;    /* +128: bytes of the ESRT copy */
+    uint64_t smbios_copy_phys;      /* +132: NVS-preserved SMBIOS structure table */
+    uint32_t smbios_copy_size;      /* +140: bytes of it */
+    uint8_t  smbios_major;          /* +144: its version */
+    uint8_t  smbios_minor;          /* +145 */
+    uint8_t  smbios_from;           /* +146: SMBIOS_FROM_* (boxos_smbios.h), 0 for none */
+    uint8_t  smbios_reserved;       /* +147 */
 } boot_info_t;
 
 /*
@@ -129,7 +144,7 @@ _Static_assert(__builtin_offsetof(boot_info_t, boot_drive)      == 24, "stage2 w
 _Static_assert(__builtin_offsetof(boot_info_t, page_table_base) == 28, "stage2 writes page_table_base at +28");
 _Static_assert(__builtin_offsetof(boot_info_t, stack_base)      == 32,
                "stage2 writes stack_base at +32 and kernel_entry.asm reads it there");
-_Static_assert(sizeof(boot_info_t) == 132, "stage2 BOOT_INFO_BYTES: the block it zeroes before it writes");
+_Static_assert(sizeof(boot_info_t) == 148, "stage2 BOOT_INFO_BYTES: the block it zeroes before it writes");
 
 /* A block a loader of this tree wrote: its magic, and a method it knows. */
 static inline int boot_info_valid(const boot_info_t *bi)

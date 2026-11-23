@@ -6,6 +6,7 @@
  */
 
 #include "gangway.h"
+#include "boxos_smbios.h"
 
 /* Defensive ceiling on EFI Configuration Table entry count. Real firmware
  * publishes 6-20 entries (ACPI 1.0, ACPI 2.0, SMBIOS 2.1/3.0, ESRT, MPS,
@@ -29,6 +30,9 @@ uint64_t g_efi_cfg_table_phys    = 0;
 uint32_t g_efi_cfg_table_count   = 0;
 uint64_t g_efi_esrt_copy_phys    = 0;
 uint32_t g_efi_esrt_copy_size    = 0;
+uint64_t g_smbios_copy_phys      = 0;
+uint32_t g_smbios_copy_size      = 0;
+uint8_t  g_smbios_major, g_smbios_minor, g_smbios_from;
 
 /* The system table's runtime services, Configuration Table and revision,
  * captured before any boot-services call that could reshape them. Per UEFI
@@ -247,4 +251,71 @@ void EsrtKeep(void)
     } else {
         Print("Gangway: ESRT not published by firmware\r\n");
     }
+}
+
+/* =========================================================================
+ * SMBIOS capture (DMTF DSP0134 3.8.0 §5.2; UEFI 2.10 §4.6)
+ *
+ * The firmware publishes the entry point in the Configuration Table — the
+ * 64-bit one under SMBIOS3_TABLE_GUID, the 32-bit under SMBIOS_TABLE_GUID —
+ * and UEFI 2.10 §2.3 lets the structure table lie in EfiBootServicesData,
+ * which the kernel's PMM takes back after EBS. So the table is copied whole
+ * into EfiACPIMemoryNVS here, as the ESRT is, and the kernel reads what the
+ * machine calls itself from the copy (drivers/smbios). The 64-bit entry point
+ * first: the 32-bit one's table is a consistent subset of it (§5.2).
+ * ========================================================================= */
+
+#define SMBIOS_TABLE_GUID \
+    EFI_GUID_INIT(0xeb9d2d31,0x2d88,0x11d3, 0x9a,0x16,0x00,0x90,0x27,0x3f,0xc1,0x4d)
+#define SMBIOS3_TABLE_GUID \
+    EFI_GUID_INIT(0xf2fd1544,0x9794,0x4a2c, 0x99,0x2e,0xe5,0xbb,0xcf,0x20,0xe3,0x94)
+
+/* The entry point published under `guid`, read into *e: 1 when it holds. */
+static int SmbiosEntryFound(const EFI_GUID* guid, SmbiosEntry* e)
+{
+    if (!g_st || !g_st->configuration_table)
+        return 0;
+    UINTN n = g_st->number_of_table_entries;
+    if (n > EFI_CFG_TABLE_MAX_ENTRIES) n = EFI_CFG_TABLE_MAX_ENTRIES;
+    for (UINTN i = 0; i < n; i++)
+        if (GuidEqual(&g_st->configuration_table[i].vendor_guid, guid) && g_st->configuration_table[i].vendor_table)
+            return SmbiosEntryRead((const uint8_t*)g_st->configuration_table[i].vendor_table, 32u, e);
+    return 0;
+}
+
+void SmbiosKeep(void)
+{
+    EFI_GUID    v3 = SMBIOS3_TABLE_GUID, v2 = SMBIOS_TABLE_GUID;
+    SmbiosEntry e;
+    if (!SmbiosEntryFound(&v3, &e) && !SmbiosEntryFound(&v2, &e)) {
+        Print("Gangway: SMBIOS not published by firmware\r\n");
+        return;
+    }
+    if (e.bytes > SMBIOS_TABLE_MOST) {
+        Print("Gangway: SMBIOS: a structure table of ");
+        PrintDec(e.bytes);
+        Print(" bytes is no machine's — ignoring\r\n");
+        return;
+    }
+    /* Below 4 GB, as the ESRT's copy: the kernel reads it before its own
+     * page tables cover more. */
+    EFI_PHYSICAL_ADDRESS buf = 0xFFFFF000ULL;
+    if (EFI_ERROR(g_bs->allocate_pages(AllocateMaxAddress, EfiACPIMemoryNVS, (e.bytes + PAGE_4KB - 1) / PAGE_4KB,
+                                       &buf))) {
+        Print("Gangway: SMBIOS NVS alloc failed\r\n");
+        return;
+    }
+    MemCopy((void*)(uintptr_t)buf, (const void*)(uintptr_t)e.table, e.bytes);
+    g_smbios_copy_phys = buf;
+    g_smbios_copy_size = e.bytes;
+    g_smbios_major     = e.major;
+    g_smbios_minor     = e.minor;
+    g_smbios_from      = e.from;
+    Print("Gangway: SMBIOS ");
+    PrintDec(e.major);
+    Print(".");
+    PrintDec(e.minor);
+    Print(" copied to ACPI_NVS (");
+    PrintDec(e.bytes);
+    Print(" bytes)\r\n");
 }

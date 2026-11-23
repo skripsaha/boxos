@@ -224,6 +224,11 @@ void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->efi_cfg_table_count   = g_efi_cfg_table_count;
     bi->efi_esrt_copy_phys    = g_efi_esrt_copy_phys;
     bi->efi_esrt_copy_size    = g_efi_esrt_copy_size;
+    bi->smbios_copy_phys      = g_smbios_copy_phys;
+    bi->smbios_copy_size      = g_smbios_copy_size;
+    bi->smbios_major          = g_smbios_major;
+    bi->smbios_minor          = g_smbios_minor;
+    bi->smbios_from           = g_smbios_from;
 }
 
 /* =========================================================================

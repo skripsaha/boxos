@@ -78,7 +78,7 @@ STAGE2_SIGNATURE      equ 0x2907
 ; boot_info — the layout is src/include/boot_info.h, whose static assertions
 ; hold every offset written below and the size zeroed before it.
 BOOT_INFO_MAGIC       equ 0x544F4F42     ; 'B','O','O','T'
-BOOT_INFO_BYTES       equ 132
+BOOT_INFO_BYTES       equ 148
 BOOT_METHOD_BIOS      equ 0
 
 ; The Boarding Pass — what this loader tells the kernel about its own arrival,

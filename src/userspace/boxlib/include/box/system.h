@@ -279,6 +279,20 @@ typedef struct {
 /* Returns 0 on success, -1 on failure. */
 int efi_info(efi_info_t *out);
 
+/* What the machine calls itself, as its firmware's SMBIOS table says
+ * (SYSTEM_OP_MACHINE_INFO; boxos_system_info.h MachineInfo): 0, or a negative
+ * -error_t. A field the firmware left out or filled with a vendor's
+ * placeholder is empty. */
+typedef MachineInfo machine_info_t;
+int machine_info(machine_info_t *out);
+/* The machine as a person is told it, into `out` (`room` bytes, NUL-ended):
+ * its maker by the brand it is known by ("ASUSTeK COMPUTER INC." is ASUS),
+ * then its model — the product, the version where the maker keeps the model
+ * there (Lenovo: "ThinkPad X1 Carbon 5th"), the board's when the product is
+ * left out ("Gigabyte B365M AORUS ELITE"). Empty for a machine that says
+ * nothing of itself. The bytes written. */
+size_t machine_shown(const machine_info_t *m, char *out, size_t room);
+
 /* idx in [0, efi_info().esrt_count). Returns 0 on success. */
 int efi_esrt_entry(uint32_t idx, efi_esrt_entry_t *out);
 

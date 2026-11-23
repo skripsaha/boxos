@@ -696,6 +696,87 @@ int efi_info(efi_info_t *out)
     return 0;
 }
 
+int machine_info(machine_info_t *out)
+{
+    if (!out) return -ERR_INVALID_ARGUMENT;
+    uint32_t got = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_MACHINE_INFO, NULL, 0, NULL, 0, out, sizeof(*out), &got,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != 0)            return box_fail(rc);
+    if (got < sizeof(*out)) return -ERR_INTERNAL;
+    return 0;
+}
+
+/* Whether `text` begins with `word`, the case folded, and no letter follows. */
+static bool machine_word_begins(const char *text, const char *word)
+{
+    size_t n = 0;
+    for (; word[n]; n++) {
+        char a = text[n], b = word[n];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+        if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+        if (a != b) return false;
+    }
+    char next = text[n];
+    return !((next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z'));
+}
+
+/* The brands makers are known by, against the long names their firmware
+ * gives ("ASUSTeK COMPUTER INC.", "Micro-Star International Co., Ltd."),
+ * matched at the beginning of the maker's name. */
+static const struct {
+    const char *begins;
+    const char *brand;
+} machine_brands[] = {
+    { "asustek", "ASUS" },     { "asus", "ASUS" },          { "lenovo", "Lenovo" },     { "dell", "Dell" },
+    { "hewlett-packard", "HP" }, { "hp", "HP" },            { "acer", "Acer" },         { "apple", "Apple" },
+    { "micro-star", "MSI" },   { "msi", "MSI" },            { "gigabyte", "Gigabyte" }, { "samsung", "Samsung" },
+    { "microsoft", "Microsoft" }, { "huawei", "Huawei" },   { "honor", "Honor" },       { "xiaomi", "Xiaomi" },
+    { "timi", "Xiaomi" },      { "toshiba", "Toshiba" },    { "dynabook", "Dynabook" }, { "sony", "Sony" },
+    { "fujitsu", "Fujitsu" },  { "framework", "Framework" }, { "intel", "Intel" },      { "asrock", "ASRock" },
+    { "biostar", "Biostar" },  { "supermicro", "Supermicro" }, { "razer", "Razer" },    { "lg electronics", "LG" },
+    { "panasonic", "Panasonic" }, { "medion", "Medion" },   { "system76", "System76" }, { "google", "Google" },
+    { "chuwi", "Chuwi" },      { "qemu", "QEMU" },          { "innotek", "VirtualBox" }, { "vmware", "VMware" },
+};
+
+/* The brand `maker` is known by into `out`: a known one, else the maker's
+ * first word, a comma or a dot after it left off. */
+static void machine_brand(const char *maker, char *out, size_t room)
+{
+    out[0] = '\0';
+    for (size_t i = 0; i < sizeof(machine_brands) / sizeof(machine_brands[0]); i++)
+        if (machine_word_begins(maker, machine_brands[i].begins)) {
+            snprintf(out, room, "%s", machine_brands[i].brand);
+            return;
+        }
+    size_t n = 0;
+    while (maker[n] && maker[n] != ' ' && maker[n] != ',' && n + 1 < room) n++;
+    while (n && maker[n - 1] == '.') n--;
+    memcpy(out, maker, n);
+    out[n] = '\0';
+}
+
+size_t machine_shown(const machine_info_t *m, char *out, size_t room)
+{
+    if (!out || !room) return 0;
+    out[0] = '\0';
+    if (!m) return 0;
+    char        brand[MACHINE_TEXT_MOST];
+    const char *maker = m->maker, *model = m->product;
+    machine_brand(maker, brand, sizeof(brand));
+    if (strcmp(brand, "Lenovo") == 0 && m->version[0]) model = m->version;
+    if (!model[0] && m->board[0]) {
+        model = m->board;
+        maker = m->board_maker[0] ? m->board_maker : m->maker;
+        machine_brand(maker, brand, sizeof(brand));
+    }
+    int n = !model[0]                                        ? snprintf(out, room, "%s", brand)
+          : !brand[0] || machine_word_begins(model, brand)   ? snprintf(out, room, "%s", model)
+                                                             : snprintf(out, room, "%s %s", brand, model);
+    if (n < 0) { out[0] = '\0'; return 0; }
+    return (size_t)n < room ? (size_t)n : room - 1u;
+}
+
 int efi_esrt_entry(uint32_t idx, efi_esrt_entry_t *out)
 {
     if (!out) return -ERR_INVALID_ARGUMENT;

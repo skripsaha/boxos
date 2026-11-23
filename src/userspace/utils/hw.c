@@ -1,7 +1,8 @@
 /*
  * hw — real-HW per-process state utility.
  *
- *   hw                         — CPU feature summary (from cpu_caps page)
+ *   hw                         — the machine, as its firmware names it, and
+ *                                the CPU feature summary (from cpu_caps page)
  *   hw cpu                     — full CPU feature table
  *   hw pku get [<pkey>]        — read PKRU (all keys or one)
  *   hw pku set <pkey> <ad> <wd>— write a single PKRU slot
@@ -20,7 +21,7 @@
 #include "box/hw.h"
 #include "box/system.h"
 
-BOX_FORM("takes optional words \"what to do: cpu, tme, pku get [key], pku set key ad wd, lam get, lam set none|u48|u57; nothing shows the CPU summary\"\n");
+BOX_FORM("takes optional words \"what to do: cpu, tme, pku get [key], pku set key ad wd, lam get, lam set none|u48|u57; nothing shows the machine and the CPU summary\"\n");
 
 static int parse_uint(const char *s, uint32_t *out)
 {
@@ -48,8 +49,24 @@ static const char *lam_name(int mode)
 
 /* ─── CPU feature table ─────────────────────────────────────────────── */
 
+/* The machine as a person is told it (machine_shown), and what its firmware's
+ * SMBIOS table says it is. */
+static void do_machine(void)
+{
+    machine_info_t m;
+    char           shown[2u * MACHINE_TEXT_MOST + 2u];
+    if (machine_info(&m) != 0 || m.from == MACHINE_FROM_NONE) {
+        println("Machine: its firmware does not say what it is");
+        return;
+    }
+    machine_shown(&m, shown, sizeof(shown));
+    printf("Machine: %s (SMBIOS %u.%u: maker \"%s\", product \"%s\", version \"%s\", board \"%s\" \"%s\")\n",
+           shown[0] ? shown : "nameless", m.major, m.minor, m.maker, m.product, m.version, m.board_maker, m.board);
+}
+
 static void do_cpu(void)
 {
+    do_machine();
     printf("%colorCPU features%color (read from caps page, post-AP intersect):\n",
            COLOR_CYAN, COLOR_DEFAULT);
     printf("  invariant TSC : %s\n", yn(cpu_get_tsc_freq_khz() != 0));
@@ -206,7 +223,7 @@ static void do_tme(void)
 static void print_help(void)
 {
     println("hw commands:");
-    println("  (no args)               — CPU feature summary");
+    println("  (no args)               — the machine and the CPU feature summary");
     println("  cpu                     — full CPU feature table");
     println("  pku get [<pkey>]        — read PKRU (all 16 or one slot)");
     println("  pku set <pkey> <ad> <wd>— write a single PKRU slot");

@@ -2495,6 +2495,7 @@ static int SysManifestRelease(const ManifestOp *op, Crate *crates,
  * ========================================================================= */
 
 #include "efi.h"
+#include "smbios.h"
 #include "efi_esrt.h"
 #include "efi_secureboot.h"
 #include "efi_authenticode.h"
@@ -2504,6 +2505,21 @@ _Static_assert(sizeof(((EfiInfo *)0)->cert_count_by_db) == sizeof(((EfiSecureBoo
                "EfiInfo carries a count for every Secure Boot database the kernel enumerates");
 
 /* out_crate: an EfiInfo (boxos_system_info.h), whole. */
+/* SYSTEM_OP_MACHINE_INFO — out_crate: one MachineInfo, what the machine
+ * calls itself as its SMBIOS table says (drivers/smbios). */
+static int SysMachineInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                          const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx)                              return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < sizeof(MachineInfo)) return ERR_BUFFER_TOO_SMALL;
+    MachineInfo info;
+    SmbiosMachine(&info);
+    return crate_write(out, ctx, &info, sizeof(info)) == OK ? OK : ERR_INVALID_ADDRESS;
+}
+
 static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -2667,6 +2683,7 @@ error_t SystemDeckRegister(void)
           "system.manifest.release" },
         /* EFI introspection: open to any process (read-only state). */
         { SYSTEM_OP_EFI_INFO,     SysEfiInfo,     OP_AUTH_NONE,   "system.efi.info"   },
+        { SYSTEM_OP_MACHINE_INFO, SysMachineInfo, OP_AUTH_NONE,   "system.machine.info" },
         { SYSTEM_OP_EFI_ESRT_GET, SysEfiEsrtGet,  OP_AUTH_NONE,   "system.efi.esrt"   },
         /* PE verification gated to utility-or-better — it can be expensive
          * (RSA modexp + SHA-256 stream) so we keep it out of the unauth

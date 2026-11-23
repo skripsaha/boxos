@@ -37,6 +37,7 @@
 #include "xhci_interrupt.h"
 #include "boardroom.h"
 #include "acpi.h"
+#include "smbios.h"
 #include "ahci.h"
 #include "cabin_layout.h"
 #include "tagfs.h"
@@ -463,6 +464,11 @@ void kernel_main(void)
 
     // ACPI must init early so irqchip_init can parse MADT for APIC detection
     debug_printf("[INIT] ACPI Subsystem (early)...\n");
+    /* What the machine calls itself, from its firmware's SMBIOS table: Gangway's
+     * copy in ACPI NVS on a UEFI start, the F-segment on a BIOS one. Said
+     * either way — a log with no [SMBIOS] line could be a reader that never ran. */
+    SmbiosInit();
+
     acpi_error_t acpi_err = acpi_init();
     if (acpi_err == ACPI_OK)
     {

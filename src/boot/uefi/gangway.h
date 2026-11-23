@@ -82,10 +82,16 @@ extern uint64_t g_efi_cfg_table_phys;
 extern uint32_t g_efi_cfg_table_count;
 extern uint64_t g_efi_esrt_copy_phys;
 extern uint32_t g_efi_esrt_copy_size;
+/* The SMBIOS structure table, copied into ACPI NVS before ExitBootServices
+ * (SmbiosKeep): zero when the firmware published none. */
+extern uint64_t g_smbios_copy_phys;
+extern uint32_t g_smbios_copy_size;
+extern uint8_t  g_smbios_major, g_smbios_minor, g_smbios_from;
 void     FirmwareTablesTake(EFI_SYSTEM_TABLE *st);
 void     FirmwareTablesSay(EFI_SYSTEM_TABLE *st);
 uint64_t FindAcpiRsdp(void);
 void     EsrtKeep(void);
+void     SmbiosKeep(void);
 
 /*
  * gangway_medium.c: the medium whose volume is a book this loader boots,

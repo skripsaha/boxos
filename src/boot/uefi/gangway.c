@@ -266,6 +266,7 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (EFI_ERROR(SetupPageTables(kernel_end_phys))) Panic("page table setup failed");
 
     EsrtKeep();
+    SmbiosKeep();
     Moment("tables");
 
     /* boot_info carries the RSDP and the ESRT copy, so it is filled before EBS. */
