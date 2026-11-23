@@ -3,9 +3,12 @@
  *
  *   volumes                 every volume: its number, what it is called,
  *                           how full it is, and where it stands
- *   volumes 1               the one numbered 1
+ *   volumes 1               the one numbered 1; `volumes Photos` the one
+ *                           called so
  *   volumes 1 Фото 2026     the one numbered 1 is called "Фото 2026" from now
- *                           on — kept in its book, the name goes with it
+ *                           on — kept in its book, the name goes with it;
+ *                           `volumes Photos Фото 2026` renames the one called
+ *                           Photos
  *   volumes shipped 0       what came with the system on volume 0 — its
  *                           programs, fonts and help, none of the person's
  *                           files — given back as `them`: `carry them 1 copy`
@@ -15,6 +18,12 @@
  *                           "Photos", and given the system: the kernel and
  *                           the programs the system keeps — once the person
  *                           at the screen says yes
+ *
+ * A volume is named by the name a person gave it or by its number, a disk by
+ * what its medium calls itself, a volume's name on it or its number
+ * (volume_named, disk_named); a name several share is asked again by number.
+ * A volume whose medium is out of the machine is said to be: its files are
+ * shown by nothing till it is back, and the changes waiting for it here.
  */
 
 #include "box/print.h"
@@ -26,7 +35,7 @@
 #include "box/error.h"
 #include "box/system.h"
 
-BOX_FORM("takes optional text \"a volume's number, and the name to give it; or new, a disk's number, a partition's entry and a name; or shipped and a volume's number\"\n"
+BOX_FORM("takes optional text \"a volume's name or number, and the name to give it; or new, a disk, a partition's entry and a name; or shipped and a volume\"\n"
          "gives things\n");
 
 /* One volume, one line: its number, what it is called, and what stands. */
@@ -37,12 +46,15 @@ static void volumes_say(const VolumeListed *v)
     volume_shown(v, shown, sizeof(shown));
     size_shown(v->FreeBytes, free_text, sizeof(free_text));
     printf("%3u  %s%s", v->Number, shown, v->Home ? " (home)" : "");
-    if (v->Mounted)
+    if (v->Away)
+        printf(" — not plugged in: its %llu file(s) show again when it is", (unsigned long long)v->Files);
+    else if (v->Mounted)
         printf(" — %llu file(s), %s free", (unsigned long long)v->Files, free_text);
     else
         printf(" — not mounted");
-    if (v->Away)
-        printf(", its medium left: waiting for it");
+    if (v->Away && v->Unwritten)
+        printf("; %llu change(s) wait to be written to it — plug it back in here before anywhere else",
+               (unsigned long long)v->Unwritten);
     if (v->ReadOnly)
         printf(", read only");
     if (v->Removable)
@@ -72,7 +84,7 @@ static const char *volumes_refusal(int rc)
     case ERR_INVALID_ARGUMENT:  return "it is not a name: UTF-8 of any language, no control character";
     case ERR_ACCESS_DENIED:     return "only the person's hands name a volume";
     case ERR_OBJECT_NOT_FOUND:  return "there is no volume of that number";
-    case ERR_DEVICE_NOT_READY:  return "its medium left";
+    case ERR_DEVICE_NOT_READY:  return "it is not plugged in";
     case ERR_TAGFS_READ_ONLY:   return "it takes no change";
     case ERR_TAGFS_NO_SPACE:    return "its book had no room for it; it keeps the name it had";
     default:                    return "the volume refused it";
@@ -114,31 +126,39 @@ static bool volumes_number(const char **at, uint32_t *out)
  * the volume laid and given the system. */
 static int volumes_new(const char *at)
 {
-    uint32_t seat = 0, entry = 0;
-    if (!volumes_number(&at, &seat) || !volumes_number(&at, &entry)) {
-        println("A volume is laid on a partition: volumes new <disk> <entry> [name] — `disks` shows them");
-        return 1;
-    }
-    if (strlen(at) > STORAGE_VOLUME_NAME_MOST) {
-        printf("A volume's name is %u bytes at the most\n", STORAGE_VOLUME_NAME_MOST);
-        return 1;
-    }
     DiskListed *disks = NULL;
     size_t      count = 0;
     if (disk_list(&disks, &count) != 0) {
         println("The disks could not be listed");
         return 1;
     }
-    const DiskListed     *d = NULL;
-    const DiskPartListed *p = NULL;
-    for (size_t i = 0; i < count; i++)
-        if (disks[i].Seat == seat) d = &disks[i];
-    for (size_t i = 0; d && i < d->PartCount; i++)
+    const char       *named  = at;
+    const DiskListed *d      = NULL;
+    size_t            called = disk_named(&at, disks, count, &d);
+    uint32_t          entry  = 0;
+    if (called == 0 && *named >= '0' && *named <= '9') {
+        printf("There is no disk numbered %.*s\n", (int)strcspn(named, " "), named);
+        free(disks);
+        return 1;
+    }
+    if (called == 1 && !volumes_number(&at, &entry)) called = 0;
+    if (called != 1) {
+        println(called ? "More than one disk is called so — name it by its number (disks shows them)"
+                       : "A volume is laid on a partition: volumes new <disk> <entry> [name] — disks shows them");
+        free(disks);
+        return 1;
+    }
+    if (strlen(at) > STORAGE_VOLUME_NAME_MOST) {
+        printf("A volume's name is %u bytes at the most\n", STORAGE_VOLUME_NAME_MOST);
+        free(disks);
+        return 1;
+    }
+    uint32_t              seat = d->Seat;
+    const DiskPartListed *p    = NULL;
+    for (size_t i = 0; i < d->PartCount; i++)
         if (d->Parts[i].Entry == entry) p = &d->Parts[i];
     int status = 1;
-    if (!d) {
-        printf("There is no disk numbered %u\n", seat);
-    } else if (!p) {
+    if (!p) {
         printf("Disk %u has no partition in entry %u\n", seat, entry);
     } else if (p->Kind != DISK_PART_BOXOS) {
         printf("Entry %u of disk %u is %s, not BoxOS's — `disks %u add boxos` lays one\n", entry, seat,
@@ -181,15 +201,20 @@ static int volumes_new(const char *at)
 static int volumes_shipped(const char *at)
 {
     uint32_t number = 0;
-    if (!volumes_number(&at, &number) || *at) {
-        println("What came with the system is asked of a volume by its number: volumes shipped <number>");
+    int      called = volume_named(&at, &number);
+    if (called != 1 || *at) {
+        println(called > 1 ? "More than one volume is called so — name it by its number (volumes shows them)"
+                           : "What came with the system is asked of a volume by its name or number: volumes shipped "
+                             "<volume>");
         return 1;
     }
     file_id_t *ids   = NULL;
     int        count = files_shipped(number, &ids);
     if (count < 0) {
         printf("Volume %u could not be asked what came with the system: %s\n", number,
-               count == -ERR_OBJECT_NOT_FOUND ? "there is no volume of that number" : "the volume refused it");
+               count == -ERR_OBJECT_NOT_FOUND ? "there is no volume of that number"
+               : count == -ERR_DEVICE_NOT_READY ? "it is not plugged in"
+                                                : "the volume refused it");
         return 1;
     }
     printf("%d file(s) came with the system on volume %u — `them` for the next command\n", count, number);
@@ -223,20 +248,15 @@ int main(void)
 
     uint32_t    number = 0;
     const char *at     = text;
-    if (*at < '0' || *at > '9') {
-        println("A volume is named by its number: volumes <number> <name>");
+    int         called = volume_named(&at, &number);
+    if (called != 1) {
+        if (called > 1)
+            println("More than one volume is called so — name it by its number (volumes shows them)");
+        else
+            printf("There is no volume called or numbered %s — volumes shows them\n", text);
         exit(1);
         return 1;
     }
-    while (*at >= '0' && *at <= '9' && number <= 0x7FFFu)
-        number = number * 10u + (uint32_t)(*at++ - '0');
-    if (*at && *at != ' ') {
-        println("A volume is named by its number: volumes <number> <name>");
-        exit(1);
-        return 1;
-    }
-    while (*at == ' ')
-        at++;
 
     if (*at) {
         size_t len = strlen(at);

@@ -3,7 +3,10 @@
  *
  *   carry note.txt, photo.png 1       moved to volume 1: there now, and only there
  *   carry note.txt 1 copy             copied to volume 1: there too
+ *   carry them Holiday photos         moved to the volume called so
  *
+ * A volume is named by the name a person gave it or by its number
+ * (volume_named); a name several volumes share is asked again by number.
  * A file goes as it was: its bytes, its name, its tags, the programs it shows
  * them to, its term in the trash, who made it and when. `volumes` says what
  * the house holds; the copies are given back as `them`.
@@ -18,7 +21,7 @@
 #include "box/system.h"
 
 BOX_FORM("takes things \"the files to carry\"\n"
-         "takes text \"the volume's number to carry them to, and copy to leave them where they are too\"\n"
+         "takes text \"the volume's name or number to carry them to, and copy to leave them where they are too\"\n"
          "gives things\n");
 
 /* What a refused carry is told as. */
@@ -30,7 +33,7 @@ static const char *carry_refusal(int rc)
     case ERR_INVALID_ARGUMENT:   return "a file lies on that volume already";
     case ERR_FILE_NOT_FOUND:     return "a file is not there any more";
     case ERR_PERMISSION_DENIED:  return "a file the system keeps is laid by a volume's maker, not carried";
-    case ERR_DEVICE_NOT_READY:   return "a medium left on the way";
+    case ERR_DEVICE_NOT_READY:   return "a medium is not plugged in, or left on the way";
     case ERR_BUSY:               return "a file changed while it was carried: it stays where it was, beside its copy";
     case ERR_TAGFS_NO_SPACE:     return "the volume has no room for it";
     case ERR_TAGFS_READ_ONLY:    return "the volume takes no change";
@@ -40,7 +43,8 @@ static const char *carry_refusal(int rc)
 
 static void carry_usage(void)
 {
-    println("A volume is named by its number: carry <files> <number>, or carry <files> <number> copy");
+    println("Files are carried to a volume by its name or number: carry <files> <volume>, or carry <files> <volume> "
+            "copy — volumes shows them");
 }
 
 int main(void)
@@ -55,18 +59,31 @@ int main(void)
 
     uint32_t    volume = 0;
     const char *at     = text;
-    if (*at < '0' || *at > '9') {
+    int         called = volume_named(&at, &volume);
+    if (called > 1) {
+        printf("More than one volume is called so — name it by its number (volumes shows them)\n");
+        exit(1);
+        return 1;
+    }
+    bool copy = called == 1 && strcmp(at, "copy") == 0;
+    if (called != 1 || (*at && !copy)) {
         carry_usage();
         exit(1);
         return 1;
     }
-    while (*at >= '0' && *at <= '9' && volume <= 0x7FFFu)
-        volume = volume * 10u + (uint32_t)(*at++ - '0');
-    while (*at == ' ')
-        at++;
-    bool copy = strcmp(at, "copy") == 0;
-    if (*at && !copy) {
-        carry_usage();
+
+    char          shown[STORAGE_VOLUME_NAME_MOST + 64];
+    VolumeListed *v = NULL;
+    bool          away = false;
+    if (volume_info(volume, &v) == 0) {
+        volume_shown(v, shown, sizeof(shown));
+        away = v->Away;
+        free(v);
+    } else {
+        snprintf(shown, sizeof(shown), "volume %u", volume);
+    }
+    if (away) {
+        printf("%s is not plugged in: nothing is carried to it — plug it in and say it again\n", shown);
         exit(1);
         return 1;
     }
@@ -82,14 +99,6 @@ int main(void)
     int rc = copy ? files_copy_to(volume, files, count, copies, &carried, &dropped)
                   : files_move_to(volume, files, count, copies, &carried, &dropped);
 
-    char          shown[STORAGE_VOLUME_NAME_MOST + 64];
-    VolumeListed *v = NULL;
-    if (volume_info(volume, &v) == 0) {
-        volume_shown(v, shown, sizeof(shown));
-        free(v);
-    } else {
-        snprintf(shown, sizeof(shown), "volume %u", volume);
-    }
     if (carried)
         printf("%s %u file(s) to %s\n", copy ? "Copied" : "Moved", (unsigned)carried, shown);
     if (dropped)

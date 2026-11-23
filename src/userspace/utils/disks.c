@@ -22,7 +22,10 @@
  *                                ground at its next mount
  *   disks 1 mend                 both copies of disk 1's table put right
  *
- * A disk is named by its number, the seat it sits in. Nothing is changed
+ * A disk is named by its number, the seat it sits in, by what its medium
+ * calls itself, or by the name of a volume standing on it (`disks Zen`); a
+ * volume by its name or number (disk_named, volume_named); a name several
+ * share is asked again by number. Nothing is changed
  * before the person at the screen sees what goes and says yes; with nobody
  * there, nothing is (box/form.h form_person_here). What another system keeps
  * is never touched: a partition is laid only in free space, and only BoxOS's
@@ -44,7 +47,7 @@
 #include "box/system.h"
 #include "fat.h"
 
-BOX_FORM("takes optional text \"a disk's number, and new, add, remove, grow, boot or mend\"\n");
+BOX_FORM("takes optional text \"a disk's name or number, and new, add, remove, grow, boot or mend\"\n");
 
 /* ── telling ─────────────────────────────────────────────────────────────── */
 
@@ -380,11 +383,15 @@ static int disks_boot(const DiskListed *d, const char *what)
     uint32_t entry = 0, volume = 0;
     bool     read  = *what >= '0' && *what <= '9';
     while (*what >= '0' && *what <= '9' && entry <= 0xFFFFu) entry = entry * 10u + (uint32_t)(*what++ - '0');
+    read = read && *what == ' ';
     while (*what == ' ') what++;
-    read = read && *what >= '0' && *what <= '9';
-    while (*what >= '0' && *what <= '9' && volume <= 0xFFFFu) volume = volume * 10u + (uint32_t)(*what++ - '0');
-    if (!read || *what) {
-        println("BoxOS is made to start from an ESP: disks <number> boot <the ESP's entry> <a volume on the disk>");
+    int called = read ? volume_named(&what, &volume) : 0;
+    if (called > 1) {
+        println("More than one volume is called so — name it by its number (volumes shows them)");
+        return 1;
+    }
+    if (called != 1 || *what) {
+        println("BoxOS is made to start from an ESP: disks <disk> boot <the ESP's entry> <a volume on the disk>");
         return 1;
     }
     const DiskPartListed *esp = NULL;
@@ -450,7 +457,7 @@ static int disks_mend(const DiskListed *d)
 
 static int disks_usage(void)
 {
-    println("disks, or disks <number> [new | add boxos [size] | add efi <size> | remove <entry> | grow <entry> [size] | boot <entry> <volume> | mend]");
+    println("disks, or disks <disk> [new | add boxos [size] | add efi <size> | remove <entry> | grow <entry> [size] | boot <entry> <volume> | mend]");
     return 1;
 }
 
@@ -461,17 +468,16 @@ static int disks_run(const char *text, DiskListed *disks, size_t count)
         if (!count) println("No disk has a medium in it");
         return 0;
     }
-    if (*text < '0' || *text > '9') return disks_usage();
-    uint32_t seat = 0;
-    while (*text >= '0' && *text <= '9' && seat <= 0xFFu) seat = seat * 10u + (uint32_t)(*text++ - '0');
-    if (*text && *text != ' ') return disks_usage();
-    while (*text == ' ') text++;
-
-    const DiskListed *d = NULL;
-    for (size_t i = 0; i < count; i++)
-        if (disks[i].Seat == seat) d = &disks[i];
-    if (!d) {
-        printf("There is no disk numbered %u\n", seat);
+    const char       *named  = text;
+    const DiskListed *d      = NULL;
+    size_t            called = disk_named(&text, disks, count, &d);
+    if (called > 1) {
+        println("More than one disk is called so — name it by its number (disks shows them)");
+        return 1;
+    }
+    if (!called) {
+        if (*named < '0' || *named > '9') return disks_usage();
+        printf("There is no disk numbered %.*s\n", (int)strcspn(named, " "), named);
         return 1;
     }
     if (!*text) {

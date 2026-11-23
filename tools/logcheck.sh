@@ -672,8 +672,8 @@ run_replug() {
     chk $? "TagFS noticed the medium go, and held its book open"
 
     # A program that is on the absent volume, and one that is on no volume at
-    # all, must not get the same sentence.
-    grep -q "files: is there and would not start" "$S"
+    # all, must not get the same sentence: the first is told where it lies.
+    grep -qE "files lies on .*, which is not plugged in — plug it in to start it" "$S"
     chk $? "a real command on an absent medium says so"
     grep -q "Unknown command: nosuchthing" "$S"
     chk $? "and a command that does not exist is still unknown"
@@ -2812,10 +2812,10 @@ run_yank() {
 # take-down has to wait for the caller.
 #
 # What each party hears, derived from the code rather than guessed:
-#   a program that asks the volume while its medium is away — a block read of
-#      the absent medium answers ERR_DEVICE_NOT_READY (203, said by
-#      TagFSReadStream with the bytes that had landed), and the program is
-#      refused by name: "is there and would not start";
+#   a program named while its medium is away — its volume shows none of its
+#      files, the name is found on the away volume alone (TagFSAwayCalled),
+#      and the program is refused by where it lies: "files lies on ..., which
+#      is not plugged in", nothing read off the absent medium;
 #   the caller inside — nothing is let go of until it is out: the take-down
 #      says it waits, the caller steps out, and only then is the old volume let
 #      go of and the new one mounted (tagfs_abandon, the service pass);
@@ -2913,11 +2913,9 @@ run_holdground() {
     [ "$MOVED" = 0 ]
     chk $? "the host moved the stick's book on (a newer Spine slot) while it was out"
 
-    # ── a program asking the absent medium hears it is absent ──────────────
-    grep -q "answered 203 — 0 of .* bytes had landed" "$S"
-    chk $? "a read of the absent medium answered ERR_DEVICE_NOT_READY (203)"
-    grep -q "files: is there and would not start" "$S"
-    chk $? "and the program was refused by name, not called unknown"
+    # ── a program named while the medium is away hears where it lies ──────
+    grep -qE "files lies on .*, which is not plugged in — plug it in to start it" "$S"
+    chk $? "the program was refused by where it lies, not called unknown"
 
     # ── ‼ NOT THE BOOK THIS KERNEL HOLDS ───────────────────────────────────
     grep -q "$MOVED_ON_SAID" "$S"

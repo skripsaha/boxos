@@ -10,8 +10,12 @@
 # name; `volumes` lists both, and names the stick anew; `files` finds the
 # files of both, each under the volume it lies on; `carry` moves a file the
 # machine wrote onto the stick and copies the stick's file home, each as it
-# was. The stick is pulled and its book held, put back and taken up, and the
-# halt makes both durable. volume-read finds both volumes consistent, the
+# was. The stick is pulled and its book held: its files are shown by nothing
+# — `files` says it is not plugged in, a command given its files or a name
+# only it carries is refused once, naming it, and `volumes` says so — put back
+# and taken up, its files shown again; and the halt makes both durable. A
+# volume is named by its name as by its number (carry, files ... on,
+# volumes). volume-read finds both volumes consistent, the
 # stick called by its new name, the moved file on it alone with its bytes and
 # the copy home; and a second boot of the same stick says the new name and
 # finds the moved file where it went.
@@ -79,17 +83,23 @@ run_twovolumes() {
        type_line "volumes 1 Holiday photos" && wait_for_prompt &&
        type_line "say hello from home -> greet.txt" && wait_for_prompt &&
        type_line "tag greet.txt kind:greeting" && wait_for_prompt &&
-       type_line "carry greet.txt 1" && wait_for_prompt &&
+       type_line "carry greet.txt Holiday photos" && wait_for_prompt &&
        type_line "carry twovol.note.txt 0 copy" && wait_for_prompt &&
        type_line "files kind:greeting" && wait_for_prompt &&
        type_line "files kind:note" && wait_for_prompt &&
        type_line "files kind:note on 1" && wait_for_prompt &&
+       type_line "files kind:note on Holiday photos" && wait_for_prompt &&
        mon_raw "device_del usbstick" &&
        wait_for_line build/serial.log 'volume 1: the medium the volume lives on has left' "$WAIT_QUIET_S" &&
-       sleep 2 &&
+       type_line "delete them" && wait_for_prompt &&
+       type_line "read greet.txt" && wait_for_prompt &&
+       type_line "volumes Holiday photos" && wait_for_prompt &&
+       type_line "files twovol.note.txt" && wait_for_prompt &&
+       type_line "files greet" && wait_for_prompt &&
        mon_raw "drive_add 0 if=none,id=stick,file=$stick,format=raw" && sleep 1 &&
        mon_raw "device_add usb-storage,drive=stick,id=usbstick" &&
-       wait_for_line build/serial.log 'volume 1: the volume is back, in seat' "$WAIT_QUIET_S" && wait_for_prompt; then
+       wait_for_line build/serial.log 'volume 1: the volume is back, in seat' "$WAIT_QUIET_S" && wait_for_prompt &&
+       type_line "files kind:greeting on Holiday photos" && wait_for_prompt; then
         rc=0
     fi
     twovol_halt first || rc=1
@@ -109,10 +119,30 @@ run_twovolumes() {
     twovol_answer "$L" "files kind:note on 1" | grep -q "^On Holiday photos:" &&
         ! twovol_answer "$L" "files kind:note on 1" | grep -q "(home)"
     chk $? "twovolumes: a search narrowed to the stick finds its file alone"
+    twovol_answer "$L" "files kind:note on Holiday photos" | grep -q "^twovol.note.txt " &&
+        twovol_answer "$L" "files kind:note on Holiday photos" | grep -q "^On Holiday photos:"
+    chk $? "twovolumes: and narrowed to it by its name"
     twovol_said "$L" 'volume 1: the medium the volume lives on has left — its book is held open' \
         "the stick pulled, its book is held open, the volume named"
+    twovol_answer "$L" "delete them" | grep -q "^delete: it lies on Holiday photos, which is not plugged in — plug it in"
+    chk $? "twovolumes: a command given a file of the pulled stick is refused once, naming it"
+    twovol_answer "$L" "read greet.txt" |
+        grep -q "^read: greet.txt lies on Holiday photos, which is not plugged in — plug it in"
+    chk $? "twovolumes: and one given a name only the pulled stick carries"
+    twovol_answer "$L" "volumes Holiday photos" |
+        grep -qE "^ +1  Holiday photos — not plugged in: its [0-9]+ file\(s\) show again when it is"
+    chk $? "twovolumes: volumes, the stick named by its name, says it is not plugged in"
+    twovol_answer "$L" "files twovol.note.txt" | grep -q "^twovol.note.txt " &&
+        ! twovol_answer "$L" "files twovol.note.txt" | grep -q "On Holiday photos" &&
+        twovol_answer "$L" "files twovol.note.txt" | grep -q "^Holiday photos is not plugged in: its files show again"
+    chk $? "twovolumes: files shows the home copy alone, and says the stick is not plugged in"
+    twovol_answer "$L" "files greet" | grep -q "^Nothing here answers that" &&
+        twovol_answer "$L" "files greet" | grep -q "^Holiday photos is not plugged in"
+    chk $? "twovolumes: a word only the pulled stick answers is said to lie there"
     twovol_said "$L" 'volume 1: the volume is back, in seat [0-9]+: .* Its book is taken up' \
         "put back, its book is taken up"
+    twovol_answer "$L" "files kind:greeting on Holiday photos" | grep -q "^greet.txt "
+    chk $? "twovolumes: and its files are shown again"
     ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|DEFECT' "$L"
     chk $? "twovolumes: no panic, no fault, no defect said"
 
