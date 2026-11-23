@@ -989,6 +989,51 @@ static int files_starting_page(const void *bytes, size_t length, uint32_t on, fi
     return rc == 0 ? 0 : box_fail(rc);
 }
 
+/* The files that came with the system on `volume` into `ids` — room for
+ * `room` — *total how many there are. 0, or a negative -error_t. */
+static int files_shipped_page(uint32_t volume, file_id_t *ids, uint32_t room, uint32_t *total)
+{
+    uint32_t out_cap = 8u + room * (uint32_t)sizeof(file_id_t);
+    uint8_t *out     = malloc(out_cap);
+    if (!out) return -ERR_NO_MEMORY;
+    uint32_t actual = 0, delivered = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_SHIPPED, &volume, sizeof(volume), NULL, 0, out, out_cap, &actual,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    if (rc == 0 && actual >= 8u) {
+        memcpy(&delivered, out, sizeof(delivered));
+        memcpy(total, out + 4, sizeof(*total));
+        if (delivered > room || actual < 8u + delivered * sizeof(file_id_t))
+            rc = ERR_INTERNAL;
+        else if (delivered)
+            memcpy(ids, out + 8, delivered * sizeof(file_id_t));
+    } else if (rc == 0) {
+        rc = ERR_INTERNAL;
+    }
+    free(out);
+    return rc == 0 ? 0 : box_fail(rc);
+}
+
+int files_shipped(uint32_t volume, file_id_t **out_ids)
+{
+    if (!out_ids) return -ERR_INVALID_ARGUMENT;
+    *out_ids = NULL;
+    uint32_t total = 0;
+    int rc = files_shipped_page(volume, NULL, 0, &total);
+    while (rc == 0 && total > 0) {
+        file_id_t *ids = malloc(total * sizeof(file_id_t));
+        uint32_t   now = 0;
+        if (!ids) return -ERR_NO_MEMORY;
+        rc = files_shipped_page(volume, ids, total, &now);
+        if (rc == 0 && now <= total) {
+            *out_ids = ids;
+            return (int)now;
+        }
+        free(ids);
+        total = now;
+    }
+    return rc;
+}
+
 /* The files beginning with the bytes, in `on` (files_starting_page's). */
 static int files_starting(const void *bytes, size_t length, uint32_t on, file_id_t **out_ids)
 {

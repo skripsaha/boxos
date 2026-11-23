@@ -264,6 +264,12 @@ int files_starting_with(const void* bytes, size_t length, file_id_t** out_ids);
 int query_all_on(uint32_t volume, TagsOf whose, const char* tags, const char* without, file_id_t** out_ids);
 int query_word_all_on(uint32_t volume, TagsOf whose, const char* word, file_id_t** out_ids);
 int files_starting_with_on(uint32_t volume, const void* bytes, size_t length, file_id_t** out_ids);
+/* The files that came with the system on the volume numbered `volume`: every
+ * live file its maker laid — none a program made — but the ones the system
+ * keeps in a role, which a volume's maker lays itself (volume_lay). What a
+ * fresh system is given. The count and a malloc'd list the caller frees (NULL
+ * for none), in file id order, or a negative -error_t. */
+int files_shipped(uint32_t volume, file_id_t** out_ids);
 /* A file's card: its name, size and the tags `whose` of them it wears. */
 int file_info(TagsOf whose, file_id_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB

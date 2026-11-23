@@ -599,6 +599,15 @@
  * ERR_DEVICE_NOT_READY for one that left. Laid, the partition holds a volume
  * the house has taken in, whatever came after. */
 #define STORAGE_VOLUME_LAY          0x30
+/* storage.shipped — the files that came with the system on the volume
+ * numbered by params [u32 volume]: every live file its maker laid — none a
+ * program made (no made_by) — but the ones the system keeps in a role, which
+ * a volume's maker lays itself (volume.lay). What a fresh system is given.
+ * out_crate = [u32 delivered][u32 total][u64 ids[delivered]] in file id order,
+ * each as the house names it, as storage.query's. Every program may ask, as a
+ * file's name and size are anybody's to see. ERR_OBJECT_NOT_FOUND for a
+ * number the house gave none. */
+#define STORAGE_SHIPPED             0x31
 #define STORAGE_VOLUME_LISTED_HEAD  52u     /* a record before its name */
 #define STORAGE_VOLUME_HOME         0x01u   /* flags: the volume the machine was booted from */
 #define STORAGE_VOLUME_MOUNTED      0x02u   /* its book is read and its files are found */

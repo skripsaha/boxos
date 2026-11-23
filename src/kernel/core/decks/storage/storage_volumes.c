@@ -189,3 +189,40 @@ int ObjVolumeLay(const ManifestOp *op, Crate *crates, uint16_t crate_count, cons
     Crate *out = op->out_crate == CRATE_INDEX_NONE ? NULL : &crates[op->out_crate];
     return SettleVolumeLaid(op->params[0], seating, entry, op->params + 9, len, ctx, crates, out);
 }
+
+/* STORAGE_SHIPPED  params: [u32 volume]; out_crate: [u32 delivered][u32 total]
+ * [u64 ids[delivered]], the files that came with the system (TagFSShippedPage),
+ * in file id order, as many as fit, each as the house names it. */
+int ObjShipped(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->param_size < 4 || op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
+    TagFSVolume *vol = TagFSVolumeNumbered(param_u32(op, 0));
+    if (!vol) return ERR_OBJECT_NOT_FOUND;
+
+    uint32_t  room = (uint32_t)((out->capacity - 8u) / 8u);
+    uint64_t *ids  = room ? kmalloc(8u * (uint64_t)room) : NULL;
+    if (room && !ids) return ERR_NO_MEMORY;
+    TagFSPage page;
+    int       rc = TagFSShippedPage(vol, 1, ids, room, true, &page);
+    uint64_t  bytes = 8u + 8u * (uint64_t)page.delivered;
+    uint8_t  *kp    = rc == OK ? crate_out_alloc(out, bytes) : NULL;
+    if (rc == OK && !kp)
+        rc = ERR_INVALID_ADDRESS;
+    if (rc == OK) {
+        memcpy(kp, &page.delivered, 4);
+        memcpy(kp + 4, &page.total, 4);
+        for (uint32_t i = 0; i < page.delivered; i++) {
+            uint64_t id = TagFSHouseId(vol, ids[i]);
+            memcpy(kp + 8u + 8u * (uint64_t)i, &id, 8);
+        }
+        rc = crate_out_commit(out, ctx, kp, bytes);
+        if (rc == OK)
+            out->size = bytes;
+        crate_buf_free(kp);
+    }
+    kfree(ids);
+    return rc;
+}

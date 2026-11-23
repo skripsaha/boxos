@@ -709,6 +709,12 @@ bool tagfs_key_is_reserved(const char *key, size_t key_len);
 error_t  TagFSQueryPage(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
                         uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
                         bool want_total, TagFSPage* page);
+/* The files that came with the system, paged as TagFSListPage's: every live
+ * file the volume's maker laid — none a program made — but the ones kept in a
+ * role, which a volume's maker lays itself (volume/volume_lay.h). What a
+ * fresh system is given. */
+error_t  TagFSShippedPage(TagFSVolume* vol, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+                          TagFSPage* page);
 error_t  TagFSListPage(TagFSVolume* vol, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
 /* The same question asked of the files kept deleted alone: those that wear all

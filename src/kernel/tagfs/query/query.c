@@ -107,12 +107,23 @@ static error_t QueryUnless(TagFSVolume* vol, TagOwner owner, const TagSpelling* 
 // Every file
 // ----------------------------------------------------------------------------
 
-/* The files are the map's that have a record (FileMapFiles). Every one is below
- * the id the next create takes: the mount derives that id past every record
- * the book holds (book_mount.c), so no live file has an id the volume never
- * issued. */
-static void ListPageInside(TagFSVolume* vol, const uint32_t* unless, uint32_t unless_count, uint64_t from, uint64_t* out,
-                           uint32_t room, bool want_total, TagFSPage* page)
+/* Whether file `fid` of `vol` came with the system: its maker laid it — no
+ * program made it — and it is kept in no role. Inside the door. */
+static bool ShippedIs(TagFSVolume* vol, uint64_t fid)
+{
+    FileRecord* rec     = FileMapRecordHold(vol->state.files, fid, NULL);
+    bool        shipped = rec && !rec->made_by && !(rec->flags & TAGFS_FILE_ROLE_MASK);
+    FileRecordRelease(rec);
+    return shipped;
+}
+
+/* The files are the map's that have a record (FileMapFiles), those `keep`
+ * keeps (every one for NULL). Every one is below the id the next create takes:
+ * the mount derives that id past every record the book holds (book_mount.c),
+ * so no live file has an id the volume never issued. */
+static void ListPageInside(TagFSVolume* vol, const uint32_t* unless, uint32_t unless_count,
+                           bool (*keep)(TagFSVolume*, uint64_t), uint64_t from, uint64_t* out, uint32_t room,
+                           bool want_total, TagFSPage* page)
 {
     TagFSState* fs = &vol->state;
     uint64_t    batch[QUERY_BATCH];
@@ -124,6 +135,8 @@ static void ListPageInside(TagFSVolume* vol, const uint32_t* unless, uint32_t un
             bool aside = false;
             for (uint32_t u = 0; u < unless_count && !aside; u++)
                 aside = TagBitmapHas(fs->bitmap_index, unless[u], batch[i]);
+            if (!aside && keep && !keep(vol, batch[i]))
+                aside = true;
             if (!aside && !PageTake(page, out, room, want_total, batch[i]))
                 return;
         }
@@ -142,7 +155,21 @@ error_t TagFSListPage(TagFSVolume* vol, uint64_t from, uint64_t* out, uint32_t r
     if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
     static const uint32_t aside[] = { TAGFS_DELETED_MEMBERS, TAGFS_ARRIVING_MEMBERS };
-    ListPageInside(vol, aside, 2, from, out, room, want_total, page);
+    ListPageInside(vol, aside, 2, NULL, from, out, room, want_total, page);
+    tagfs_leave(vol);
+    return OK;
+}
+
+error_t TagFSShippedPage(TagFSVolume* vol, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+                         TagFSPage* page)
+{
+    memset(page, 0, sizeof(*page));
+    if (room && !out)
+        return ERR_INVALID_ARGUMENT;
+    if (!tagfs_enter(vol))
+        return ERR_TAGFS_NOT_INITIALIZED;
+    static const uint32_t aside[] = { TAGFS_DELETED_MEMBERS, TAGFS_ARRIVING_MEMBERS };
+    ListPageInside(vol, aside, 2, ShippedIs, from, out, room, want_total, page);
     tagfs_leave(vol);
     return OK;
 }
@@ -213,7 +240,7 @@ static error_t QueryPageInside(TagFSVolume* vol, TagOwner owner, const TagSpelli
         goto out;
 
     if (live && count == 0)
-        ListPageInside(vol, unless, unless_count, from, out, room, want_total, page);
+        ListPageInside(vol, unless, unless_count, NULL, from, out, room, want_total, page);
     else if (TagBitmapQueryPage(fs->bitmap_index, tag_ids, tag_count, groups, group_count,
                                 unless, unless_count, from, out, room, want_total, page) != 0)
         rc = ERR_TAGFS_NOT_INITIALIZED;

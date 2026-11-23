@@ -6,6 +6,10 @@
  *   volumes 1               the one numbered 1
  *   volumes 1 Фото 2026     the one numbered 1 is called "Фото 2026" from now
  *                           on — kept in its book, the name goes with it
+ *   volumes shipped 0       what came with the system on volume 0 — its
+ *                           programs, fonts and help, none of the person's
+ *                           files — given back as `them`: `carry them 1 copy`
+ *                           gives volume 1 a fresh system
  *   volumes new 2 1 Photos  a new volume laid on BoxOS's partition in entry
  *                           1 of disk 2 (`disks` shows them), called
  *                           "Photos", and given the system: the kernel and
@@ -22,7 +26,8 @@
 #include "box/error.h"
 #include "box/system.h"
 
-BOX_FORM("takes optional text \"a volume's number, and the name to give it; or new, a disk's number, a partition's entry and a name\"\n");
+BOX_FORM("takes optional text \"a volume's number, and the name to give it; or new, a disk's number, a partition's entry and a name; or shipped and a volume's number\"\n"
+         "gives things\n");
 
 /* One volume, one line: its number, what it is called, and what stands. */
 static void volumes_say(const VolumeListed *v)
@@ -171,6 +176,28 @@ static int volumes_new(const char *at)
     return status;
 }
 
+/* `volumes shipped <number>`: what came with the system on that volume, given
+ * back as `them`. */
+static int volumes_shipped(const char *at)
+{
+    uint32_t number = 0;
+    if (!volumes_number(&at, &number) || *at) {
+        println("What came with the system is asked of a volume by its number: volumes shipped <number>");
+        return 1;
+    }
+    file_id_t *ids   = NULL;
+    int        count = files_shipped(number, &ids);
+    if (count < 0) {
+        printf("Volume %u could not be asked what came with the system: %s\n", number,
+               count == -ERR_OBJECT_NOT_FOUND ? "there is no volume of that number" : "the volume refused it");
+        return 1;
+    }
+    printf("%d file(s) came with the system on volume %u — `them` for the next command\n", count, number);
+    souvenir_things(ids, (size_t)count);
+    free(ids);
+    return 0;
+}
+
 int main(void)
 {
     const char *text = form_text(0);
@@ -185,6 +212,11 @@ int main(void)
     }
     if (strncmp(text, "new ", 4) == 0) {
         int rc = volumes_new(text + 4);
+        exit(rc);
+        return rc;
+    }
+    if (strncmp(text, "shipped ", 8) == 0) {
+        int rc = volumes_shipped(text + 8);
         exit(rc);
         return rc;
     }
