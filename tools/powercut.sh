@@ -670,8 +670,8 @@ run_selftest() {
     # A logger that answered before a departure came with a cycle in flight
     # (pc_logger_early): ended, or refused while its stick was away — C14 not
     # put; refused with its stick seated — the kernel's FAIL, with its line.
-    printf '%s\n' "boot" "[TagFS] the medium the volume lives on has left" "[QUILL] log: FAIL — an append answered -5" \
-        "[TagFS] the volume is back, in seat 1" "[QUILL] log: PASS — pc-l.log (fid 81): 400 lines" >"$PC_DIR/away.log"
+    printf '%s\n' "boot" "[TagFS] volume 0: the medium the volume lives on has left" "[QUILL] log: FAIL — an append answered -5" \
+        "[TagFS] volume 0: the volume is back, in seat 1" "[QUILL] log: PASS — pc-l.log (fid 81): 400 lines" >"$PC_DIR/away.log"
     said="$(pc_logger_early "$PC_DIR/away.log" 0 1 4 1)|$(pc_logger_early "$PC_DIR/away.log" 3 1 4 1)|$(pc_logger_early "$PC_DIR/away.log" 0 1 2 1)"
     case "$said" in *HARNESS*"refused while the stick was away (serial lines 1..4"*"answered -5"*"|"*HARNESS*"ended after 1 departure"*"400 lines"*"|"*FAIL*"refused with its stick seated (serial line 3"*"answered -5") true ;; *) false ;; esac
     chk $? "selftest: a logger's early answer is said with its own line — a refusal while its stick was away and an end are C14 not put, a refusal past the return is the kernel's"

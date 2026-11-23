@@ -655,11 +655,11 @@ stand_book_judge() {
     got=$(grep -acE '^\[TESTS\] .*, knocked at by the stand under glass, refused before a byte' "$L")
     [ "$got" = 4 ]
     chk $? "stand: $what — the four doors below the glass refuse the stand's knock ($got)"
-    grep -aqE '^\[TagFS\] the volume is back, in seat [0-9]+: .* — its book as this kernel left it: ' "$L"
+    grep -aqE '^\[TagFS\] volume [0-9]+: the volume is back, in seat [0-9]+: .* — its book as this kernel left it: ' "$L"
     chk $? "stand: $what — the book's medium came back as it was left and its book is taken up, said"
-    grep -aqE '^\[TagFS\] the volume came back in seat [0-9]+ as this kernel left its book, but [1-9][0-9]* of the [0-9]+ block\(s\) of data no stitch settled do not read back as written' "$L"
+    grep -aqE '^\[TagFS\] volume [0-9]+: the volume came back in seat [0-9]+ as this kernel left its book, but [1-9][0-9]* of the [0-9]+ block\(s\) of data no stitch settled do not read back as written' "$L"
     chk $? "stand: $what — a block of data no stitch settled that did not land gives the book up, said with how many"
-    grep -aqE '^\[TagFS\] the volume came back in seat [0-9]+ not as this kernel left its book: ' "$L"
+    grep -aqE '^\[TagFS\] volume [0-9]+: the volume came back in seat [0-9]+ not as this kernel left its book: ' "$L"
     chk $? "stand: $what — a medium another machine changed gives the book up, said with why"
     ! grep -aqF 'this kernel reads such a volume again from its book' "$L"
     chk $? "stand: $what — no book's medium is read again for being a book's"

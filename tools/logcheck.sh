@@ -877,7 +877,7 @@ replugwrite_judge() {
         return
     fi
     ok "replugwrite: $what — the write in the medium answered ERR_DEVICE_NOT_READY with the bytes the file holds of it: $(tr -d '\r' < "$L" | grep -aoE "write to file $fid refused \(error 203\): [0-9]+ of its [0-9]+ byte\(s\) are the file's" | head -1)"
-    verdict=$(tr -d '\r' < "$L" | grep -aE '^\[TagFS\] (the volume is back, in seat|the volume came back in seat|another volume sits in seat)' | head -1)
+    verdict=$(tr -d '\r' < "$L" | grep -aE '^\[TagFS\] volume [0-9]+: (the volume is back, in seat|the volume came back in seat|another volume sits in seat)' | head -1)
     up=$(replugwritebook_up "$change" "$verdict")
     [ -n "$up" ]
     chk $? "replugwrite: $what — the return was judged as such a stick must be: ${verdict:-no verdict at all}"
