@@ -69,6 +69,18 @@ install_boot() {
     wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt
 }
 
+# install_plug NAME SECTORS — the stick NAME plugged in while the machine
+# runs, after its firmware chose what to start from, and the volume on it
+# taken up: a stick that starts BoxOS by itself is not started instead.
+install_plug() {
+    local at=$(($(wc -l < build/serial.log) + 1))
+    mon_raw "drive_add 0 if=none,id=$1,file=$SCRATCH/install.$1.img,format=raw" && sleep 1 &&
+        mon_raw "device_add usb-storage,drive=$1,id=${1}stick" &&
+        wait_for_line -E build/serial.log "\\[USB disk [0-9]+\\] usb[0-9]+ .*: $2 sectors" "$WAIT_QUIET_S" "$at" &&
+        wait_for_line -E build/serial.log "the volume on seat [0-9]+ is MOUNTED" "$WAIT_QUIET_S" "$at" &&
+        wait_for_prompt
+}
+
 install_halt() {
     local tag=$1 rc=0
     type_line "bye" && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" || rc=1
@@ -265,11 +277,13 @@ print(next(p["first"] for p in json.load(sys.stdin)["parts"] if p["kind"] == "es
     chk $? "install (cut): the volume holds, every file of it once${twice:+ — twice: $twice}"
 
     # ── again: the fixed disk laid anew, Home put away; then removed ──────
-    # The first round put the fixed disk first in the firmware's order: its
-    # variables begun afresh, the machine starts from the home image again.
+    # The first round put the fixed disk first in the firmware's order, and
+    # the sticks start BoxOS by themselves now: the variables begun afresh, and
+    # the sticks plugged in once the machine stands on the home image.
     rm -f build/edk2-vars.fd
     rc=1
-    if install_boot again on "$SCRATCH/install.home.img" fixed pocket win && disks_ask "disks"; then
+    if install_boot again on "$SCRATCH/install.home.img" fixed && install_plug pocket 6291456 &&
+       install_plug win 4194304 && disks_ask "disks"; then
         fixed=$(disks_number "6 GB") pocket=$(disks_number "3 GB") win=$(disks_number "2 GB")
         at=$(($(wc -l < build/serial.log) + 1))
         [ -n "$fixed" ] && type_line "install $fixed whole fresh first called Again" && install_sign "$at" &&
