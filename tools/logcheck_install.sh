@@ -38,13 +38,21 @@ INSTALL_STICKS="pocket win"
 # install_device NAME — the -drive and -device of NAME: a SATA disk on the
 # next AHCI port for a disk, a USB stick for a stick.
 install_device() {
+    local slow=""
+    case " $INSTALL_SLOW " in *" $1 "*) slow=",throttling.bps-write=$INSTALL_SLOW_BPS" ;; esac
     case " $INSTALL_DISKS " in
-    *" $1 "*) printf -- '-drive if=none,id=%s,file=%s,format=raw -device ide-hd,drive=%s,bus=ide.%s ' \
-                  "$1" "$SCRATCH/install.$1.img" "$1" "$2" ;;
-    *)        printf -- '-drive if=none,id=%s,file=%s,format=raw -device usb-storage,drive=%s,id=%sstick ' \
-                  "$1" "$SCRATCH/install.$1.img" "$1" "$1" ;;
+    *" $1 "*) printf -- '-drive if=none,id=%s,file=%s,format=raw%s -device ide-hd,drive=%s,bus=ide.%s ' \
+                  "$1" "$SCRATCH/install.$1.img" "$slow" "$1" "$2" ;;
+    *)        printf -- '-drive if=none,id=%s,file=%s,format=raw%s -device usb-storage,drive=%s,id=%sstick ' \
+                  "$1" "$SCRATCH/install.$1.img" "$slow" "$1" "$1" ;;
     esac
 }
+
+# A disk named in INSTALL_SLOW is written at INSTALL_SLOW_BPS bytes a second
+# at most — the system's 123 MB carried over half a minute, so a cut lands
+# while carrying however fast the host is.
+INSTALL_SLOW=""
+INSTALL_SLOW_BPS=4194304
 
 # install_boot TAG UEFI BOOTDISK DEVICES... — the machine run to the shell
 # with the devices named after its boot disk.
@@ -227,6 +235,7 @@ print(next(p["first"] for p in json.load(sys.stdin)["parts"] if p["kind"] == "es
 
     # ── cut: stopped while the system's files are carried, gone on with ───
     rc=1
+    INSTALL_SLOW=cut
     if install_boot cut on "$SCRATCH/install.home.img" cut && disks_ask "disks"; then
         cut=$(disks_number "5 GB")
         at=$(($(wc -l < build/serial.log) + 1))
@@ -234,6 +243,7 @@ print(next(p["first"] for p in json.load(sys.stdin)["parts"] if p["kind"] == "es
             wait_for_line -E build/serial.log '^    [0-9]+ of [0-9]+ file\(s\)' "$WAIT_QUIET_S" "$at" && rc=0
     fi
     make run-stop >/dev/null 2>&1
+    INSTALL_SLOW=""
     tr -d '\r' < build/serial.log >"$SCRATCH/serial.install.cutfirst.log"
     if [ $rc = 0 ]; then
         rc=1
@@ -255,6 +265,9 @@ print(next(p["first"] for p in json.load(sys.stdin)["parts"] if p["kind"] == "es
     chk $? "install (cut): the volume holds, every file of it once${twice:+ — twice: $twice}"
 
     # ── again: the fixed disk laid anew, Home put away; then removed ──────
+    # The first round put the fixed disk first in the firmware's order: its
+    # variables begun afresh, the machine starts from the home image again.
+    rm -f build/edk2-vars.fd
     rc=1
     if install_boot again on "$SCRATCH/install.home.img" fixed pocket win && disks_ask "disks"; then
         fixed=$(disks_number "6 GB") pocket=$(disks_number "3 GB") win=$(disks_number "2 GB")
