@@ -92,8 +92,7 @@ void PlanDisk(Plan &Wanted, const DiskListed &Disk)
 {
     Wanted.DiskName   = Disk.Name;
     Wanted.DiskBlocks = Disk.Blocks;
-    Wanted.GuidKnown  = Disk.Table == DISK_TABLE_GPT;
-    std::memcpy(Wanted.DiskGuid.data(), Disk.Guid, 16);
+    Wanted.GuidKnown  = false;
     Wanted.Stick = Disk.Removable && Disk.BlockBytes == BIOS_SECTOR_BYTES;
 }
 

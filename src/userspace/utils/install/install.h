@@ -74,9 +74,10 @@ std::optional<Facts> ReadFacts(std::string &Why);
 enum class Place : std::uint8_t { Whole, Beside };
 enum class Take : std::uint8_t { Fresh, Mine };
 
-/* What the person asked for. A disk is known by its GPT's GUID once it has
- * one — across seats and starts — and by what its medium calls itself and
- * how long it is before. */
+/* What the person asked for. A disk is known by what its medium calls itself
+ * and how long it is until the table install leaves on it stands — the table
+ * step may lay a new one, and a new GPT has a GUID of its own —, and by that
+ * table's GUID from then on, across seats and starts. */
 struct Plan {
     std::array<std::uint8_t, 16> DiskGuid{};
     bool                         GuidKnown = false;
